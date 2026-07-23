@@ -10,11 +10,12 @@ and feed straight into vgpu effects/draws. The headline use case is interactive
 "MediaPipe → shader" pipelines: webcam frame in, landmarks/segmentation mask out, bound into a
 fragment shader in the same frame with zero CPU roundtrip.
 
-Non-goal for v1: training, and large-LLM-scale text generation. The op set and memory model are
-designed so transformer ops (matmul, layernorm, attention, KV cache) fit later, but the first
-target models are real-time vision models (`@tensorflow-models/*`: face landmarks, hand pose,
-selfie segmentation, body pose) because they are small, latency-sensitive, and their outputs are
-exactly what shaders want to consume.
+The scope is neural networks generally, with real-time vision models as the v1 targets
+(`@tensorflow-models/*`: face landmarks, hand pose, selfie segmentation, body pose) because they
+are small, latency-sensitive, and their outputs are exactly what shaders want to consume. The op
+set and memory model are designed so transformer ops (matmul, layernorm, attention, KV cache) fit
+later. Native training utilities are out of scope for v1, but training *is* available from day
+one through bridge mode (see "Training" below).
 
 ## Target developer experience
 
@@ -139,6 +140,30 @@ references. Later (LLM track): `layernorm`, `gelu`, fused attention, KV-cache-aw
 - **Out**: tensors bind directly into effects/draws; `toTexture()` for sampling;
   `read()` for CPU (async, never blocks the frame loop).
 
+## Training
+
+Two tiers, deliberately asymmetric in scope:
+
+### Tier 1 — train via tfjs on the shared device (ships with bridge mode)
+
+Building general training natively would mean reimplementing a framework: reverse-mode autodiff
+over the graph IR, a gradient kernel for every forward op (roughly doubles the kernel surface),
+optimizers, losses, and a data pipeline. tfjs already has all of it, and its autodiff engine and
+`model.fit()` run on the WebGPU backend. Since bridge mode registers that backend on vgpu's own
+`GPUDevice`, training comes for free with the full Keras API — and because weights, activations,
+and outputs live in buffers on the shared device, a vgpu shader can visualize the network's state
+*while it trains*, zero-copy. Train in the browser (or in Python/Keras and export), then run the
+result through the native runtime for inference.
+
+### Tier 2 — narrow native training for tiny interactive networks (later, exploratory)
+
+There is a creative-coding sweet spot that does not need general autodiff: training small MLPs in
+real time (neural textures / CPPNs / instant-NGP-style fields, where the network learns an image
+or field and a shader evaluates it per pixel). That needs only hand-written fused
+forward+backward kernels for fixed architectures (an N-layer MLP), an Adam optimizer kernel, and
+a loss kernel — a small module in `@vgpu/ml-kernels`, not a framework. General autodiff over the
+graph IR stays explicitly out of scope; tfjs remains the answer for training arbitrary models.
+
 ## Required additions to existing vgpu packages
 
 These are prerequisites, worth landing as standalone PRs because they help all compute users:
@@ -175,12 +200,13 @@ These are prerequisites, worth landing as standalone PRs because they help all c
 | # | Deliverable | Depends on |
 | --- | --- | --- |
 | 0 | Core prerequisites: batched compute pass, external image import, sub-range bindings | — |
-| 1 | `@vgpu/ml-tfjs` bridge: shared-device tfjs backend, zero-copy in/out, webcam→segmentation→shader demo | 0 (partial) |
+| 1 | `@vgpu/ml-tfjs` bridge: shared-device tfjs backend, zero-copy in/out, webcam→segmentation→shader demo; includes a live-training demo (`model.fit()` visualized by a shader mid-training) | 0 (partial) |
 | 2 | Tensor layer + `@vgpu/ml-kernels` MVP (matmul, conv, depthwise, elementwise, softmax, resize) with golden tests | 0 |
 | 3 | GraphModel parser + planner + executor; first real model (selfie segmentation) running natively, output-parity vs bridge mode | 2 |
 | 4 | Second model class (face/hand landmarks), LayersModel lowering, quantized weights | 3 |
 | 5 | Perf pass: fusion coverage, f16 kernels, arena tuning, timestamp profiler, workgroup autotune | 3 |
-| 6 | Exploratory LLM track: layernorm/gelu/attention kernels, KV cache, tiny transformer (e.g. char-level or TinyStories-class) generating on-GPU | 2, 5 |
+| 6 | Exploratory transformer track: layernorm/gelu/attention kernels, KV cache, tiny transformer (e.g. char-level) generating on-GPU | 2, 5 |
+| 7 | Exploratory native training track (tier 2): fused MLP forward+backward, Adam and loss kernels, neural-texture live-training demo | 2 |
 
 Milestone 1 is the demo-able moment ("media pipe → shader" works end to end); milestones 2–5
 replace its internals without changing the app-facing API.
