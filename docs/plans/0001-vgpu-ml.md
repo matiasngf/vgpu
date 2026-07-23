@@ -1,227 +1,173 @@
-# Plan: `@vgpu/ml` — TensorFlow.js/Keras model inference on vgpu
+# Plan: vgpu ML adapters — run and visualize neural networks on the vgpu device
 
 Status: draft plan (no code yet)
 
 ## Goal
 
-Run neural networks trained/exported in TensorFlow.js format (GraphModel `model.json` + weight
-shards, Keras LayersModel) directly on the vgpu compute surface, so model outputs stay on the GPU
-and feed straight into vgpu effects/draws. The headline use case is interactive
-"MediaPipe → shader" pipelines: webcam frame in, landmarks/segmentation mask out, bound into a
-fragment shader in the same frame with zero CPU roundtrip.
+Make vgpu the best place to *use* neural networks interactively — webcam → model →
+shader in the same frame, and live visualization of networks while they train — without building
+our own inference runtime. Mature runtimes (TensorFlow.js, ONNX Runtime Web) already have
+optimized WebGPU kernels, graph fusion, and full op coverage; reimplementing them would produce a
+permanently half-finished library. Instead, vgpu provides the layer those runtimes lack:
 
-The scope is neural networks generally, with real-time vision models as the v1 targets
-(`@tensorflow-models/*`: face landmarks, hand pose, selfie segmentation, body pose) because they
-are small, latency-sensitive, and their outputs are exactly what shaders want to consume. The op
-set and memory model are designed so transformer ops (matmul, layernorm, attention, KV cache) fit
-later. Native training utilities are out of scope for v1, but training *is* available from day
-one through bridge mode (see "Training" below).
+1. **Device sharing** — the runtime and vgpu operate on the same `GPUDevice`, so tensors and
+   shader resources are zero-copy neighbors.
+2. **Tensor ↔ shader bridging** — wrap a runtime's output `GPUBuffer` as a vgpu-bindable resource
+   with shape/dtype metadata, and feed vgpu textures (webcam, render targets) in as model inputs.
+3. **Ergonomics** — `effect.set({ mask: out.tensor })` just works, with the same ownership and
+   identity rules as every other vgpu resource.
+
+Explicit non-goal: our own kernel library, graph parser, or autodiff. If a model doesn't run well
+on the chosen runtime, the fix belongs upstream, not in a parallel half-runtime here.
 
 ## Target developer experience
 
+Inference (interactive installation: webcam → segmentation → shader):
+
 ```ts
 import { init } from "vgpu";
-import { loadGraphModel } from "@vgpu/ml";
+import { createOrtSession } from "@vgpu/ml-ort";
 
-const gpu = await init({ requiredFeatures: ["shader-f16"] });
-const model = await loadGraphModel(gpu, "/models/selfie_segmentation/model.json");
+const gpu = await init();
+const session = await createOrtSession(gpu, "/models/segmentation.onnx");
 
-const camera = gpu.videoTexture(videoEl);                    // new core capability
-const input = model.input({ from: camera, size: [256, 256], normalize: [0, 1] });
-
+const camera = gpu.videoTexture(videoEl);                  // new core capability
 const composite = gpu.effect(COMPOSITE_WGSL);
-gpu.frame.loop(() => {
-  const out = model.run(input);                              // one submit, all layers batched
-  composite.set({ mask: out.segmentation.texture, frame: camera });
+
+gpu.frame.loop(async () => {
+  const input = session.input("image", { from: camera, size: [256, 256], normalize: [0, 1] });
+  const out = await session.run({ image: input });         // outputs stay on-GPU
+  composite.set({ mask: out.mask.texture, frame: camera });
   composite.draw();
 });
 ```
 
-Key properties:
+Training visualization (tfjs owns training, vgpu owns the pixels):
 
-- `model.run()` encodes every layer as dispatches in one command encoder — never one submit per
-  layer.
-- Outputs are `Tensor` objects backed by vgpu storage buffers (or textures on request), directly
-  accepted by `effect.set()` / `draw.set()` / `compute.set()` by identity, same ownership rules as
-  today.
-- `tensor.read()` exists for debugging/CPU consumers but is never required in the hot path.
+```ts
+import { init } from "vgpu";
+import { shareDevice, wrapTensor } from "@vgpu/ml-tfjs";
+import * as tf from "@tensorflow/tfjs";
 
-## Architecture decision: bridge first, native second
+const gpu = await init();
+await shareDevice(gpu);                                    // tfjs webgpu backend on gpu's device
 
-There are two viable strategies, and the plan is to ship both, in order:
-
-### Phase A — bridge mode (`@vgpu/ml-tfjs`)
-
-tfjs already has a production WebGPU backend. Its backend can be constructed on an externally
-provided `GPUDevice`, `tensor.dataToGPU()` exposes the output `GPUBuffer`, and `tf.tensor()`
-accepts a `WebGPUData` buffer for zero-copy input. That means we can get the full
-"MediaPipe → shader" experience quickly:
-
-- Register the tfjs WebGPU backend on the same `GPUDevice` vgpu owns.
-- Wrap tfjs output buffers as vgpu `StorageBuffer` facades (`wrapStorageBuffer` in
-  `packages/vgpu-api/src/storage.ts` already wraps core buffers; this needs a sibling that wraps a
-  raw external `GPUBuffer` with an identity vgpu's binding cache understands).
-- Feed vgpu textures into tfjs via `tf.tensor({ buffer })` after a small
-  texture→buffer preprocessing kernel.
-
-Bridge mode validates the I/O design, the demos, and the public API shape with weeks of work
-instead of months, and it inherits tfjs's full op coverage. Its costs — tfjs bundle size, no
-control over fusion/memory, per-op submit granularity inside tfjs — are what native mode then
-removes.
-
-### Phase B — native mode (`@vgpu/ml`)
-
-Our own runtime: parse the TFJS GraphModel topology directly (it is JSON of TF ops:
-`Conv2D`, `FusedConv2D`/`_FusedConv2D`, `DepthwiseConv2dNative`, `Relu6`, `Add`, `Reshape`,
-`Softmax`, …), plan it, and execute it with WGSL kernels authored as `@vgpu/wgsl` modules. Same
-public API as bridge mode, selected per model load, so apps migrate model-by-model.
-
-The rest of this plan details native mode; bridge mode reuses its tensor/I-O layers.
+const model = buildKerasModel();
+const view = gpu.effect(WEIGHTS_VIS_WGSL);
+model.fit(xs, ys, {
+  callbacks: { onBatchEnd: () => {
+    const w = wrapTensor(gpu, model.layers[0].getWeights()[0]);  // zero-copy view
+    gpu.frame((f) => { view.set({ weights: w }); f.pass(surfaceTarget, view); });
+  } },
+});
+```
 
 ## Package layout
 
 | Package | Contents |
 | --- | --- |
-| `@vgpu/ml` | Public API: `Tensor`, `loadGraphModel`, `loadLayersModel`, planner, executor. |
-| `@vgpu/ml-kernels` | WGSL kernels as `@vgpu/wgsl` modules + per-op TS descriptors (dispatch geometry, bindings, uniforms). Usable standalone for hand-rolled compute. |
-| `@vgpu/ml-tfjs` | Bridge mode: tfjs-webgpu interop on a shared device. Optional peer dep on `@tensorflow/tfjs`. |
+| `@vgpu/ml` | Runtime-agnostic interop layer: `Tensor` facade (external `GPUBuffer` + shape/dtype, bindable via `set()`), preprocessing kernels (texture→tensor: resize/letterbox/normalize/NHWC-NCHW), postprocessing (tensor→texture blit for sampling), readback helpers. No runtime dependency. |
+| `@vgpu/ml-ort` | ONNX Runtime Web adapter — the **optimal inference path** for pretrained networks. Uses ORT's WebGPU EP with I/O binding (`Tensor.fromGpuBuffer()` in, `preferredOutputLocation: "gpu-buffer"` out). ONNX is the format everything exports to (Keras, PyTorch, and TFLite/MediaPipe models via conversion). |
+| `@vgpu/ml-tfjs` | TensorFlow.js adapter — **training + visualization**, and tfjs's pretrained model zoo (`@tensorflow-models/*`). Registers the tfjs WebGPU backend on vgpu's device; `tensor.dataToGPU()` out, `tf.tensor({ buffer })` in. |
 
-`vgpu` (main package) gains no hard dependency on any of these; `@vgpu/ml` depends on `vgpu` +
-`@vgpu/core`.
+Both runtime adapters are thin: device wiring + tensor conversion to/from the `@vgpu/ml`
+facade. All shader-facing behavior lives in `@vgpu/ml` so the two runtimes are interchangeable
+from the app's point of view.
 
-## Layers of the native runtime
+## Why two runtimes
 
-### 1. Tensor layer
+- **ORT Web (WebGPU EP)** is the fastest, most actively optimized web inference runtime: graph
+  optimization/fusion at session creation, tuned kernels, GPU-resident I/O. It is the answer to
+  "load a pretrained network and run it as fast as the browser allows" — the interactive
+  installation case.
+- **tfjs** is the only one with in-browser training (autodiff + `model.fit()` on WebGPU) and a
+  curated model zoo. It is the answer to "watch a network learn, live, in a shader".
 
-- `Tensor { shape, dtype, buffer, read(), toTexture(opts) }`, dtypes `f32`, `f16`, `i32`, `u32`
-  (+ quantized `u8`/`u16` weights dequantized on upload).
-- Backed by core `Buffer` via the same facade pattern as `RingStorageBuffer`, so `set()` binding
-  by identity works unchanged.
-- Reshape/transpose are metadata-only views whenever strides allow; kernels take layout uniforms.
-- `toTexture()` for outputs shaders want to *sample* (segmentation masks) — one blit kernel,
-  cached.
+Recommending one runtime for both jobs would compromise one of them; two thin adapters over one
+shared interop layer costs little.
 
-### 2. Kernel registry (`@vgpu/ml-kernels`)
+## Device sharing: the one hard integration point
 
-Priority op set, chosen from what the target MediaPipe-family graphs actually use:
+Zero-copy requires that the runtime and vgpu use the *same* `GPUDevice` — WebGPU resources cannot
+cross devices. Two mechanisms, and vgpu should support both:
 
-1. `matmul` (tiled, subgroup-friendly workgroup sizes, f32 + f16 variants)
-2. `conv2d` and `depthwise_conv2d` (direct kernels; im2col+matmul fallback for odd shapes)
-3. fused bias + activation epilogues (relu, relu6, sigmoid, tanh, hard-swish) on 1–2
-4. elementwise binary/unary (add, mul, sub, clip, exp, …) with broadcast
-5. reductions (max, sum, mean), `softmax`, `argmax`
-6. `resize_bilinear`/`nearest`, `pad`, `concat`, `slice`, `transpose`
-7. pooling (max/avg)
-
-Each kernel ships as a WGSL module plus a TS descriptor: bindings, uniform layout, workgroup
-size, dispatch-count function of shapes. Kernels are testable one-by-one against golden CPU
-references. Later (LLM track): `layernorm`, `gelu`, fused attention, KV-cache-aware matmul.
-
-### 3. Graph layer
-
-- **Parser**: GraphModel `model.json` → internal graph IR; weight shard fetch + decode
-  (including tfjs quantization headers). LayersModel support via a thin Keras→IR lowering
-  (Dense/Conv/BN/Activation cover most exported Keras models).
-- **Planner** (runs once at load):
-  - topological order, dead-node elimination, constant folding
-  - fusion: conv/matmul + bias + activation into one dispatch (mirrors `_FusedConv2D`)
-  - memory plan: liveness analysis → arena of reusable storage buffers instead of
-    one buffer per intermediate tensor
-  - fail-fast on unsupported ops with a single error listing every missing op for that model
-    (`VGPU-ML-OPS-UNSUPPORTED`), so coverage gaps are diagnosable in one shot
-- **Executor**: replays the plan into one encoder per `run()`; uniforms for dynamic shapes via
-  dynamic offsets (the performance-playbook pattern).
-
-### 4. I/O bridges
-
-- **In**: `gpu.videoTexture(video)` (core gap, see below) → preprocessing kernel
-  (letterbox/resize/normalize/NCHW-vs-NHWC) → input tensor. Also `fromTexture(target)` so a vgpu
-  render target can feed a model (shader → model → shader loops).
-- **Out**: tensors bind directly into effects/draws; `toTexture()` for sampling;
-  `read()` for CPU (async, never blocks the frame loop).
-
-## Training
-
-Two tiers, deliberately asymmetric in scope:
-
-### Tier 1 — train via tfjs on the shared device (ships with bridge mode)
-
-Building general training natively would mean reimplementing a framework: reverse-mode autodiff
-over the graph IR, a gradient kernel for every forward op (roughly doubles the kernel surface),
-optimizers, losses, and a data pipeline. tfjs already has all of it, and its autodiff engine and
-`model.fit()` run on the WebGPU backend. Since bridge mode registers that backend on vgpu's own
-`GPUDevice`, training comes for free with the full Keras API — and because weights, activations,
-and outputs live in buffers on the shared device, a vgpu shader can visualize the network's state
-*while it trains*, zero-copy. Train in the browser (or in Python/Keras and export), then run the
-result through the native runtime for inference.
-
-### Tier 2 — narrow native training for tiny interactive networks (later, exploratory)
-
-There is a creative-coding sweet spot that does not need general autodiff: training small MLPs in
-real time (neural textures / CPPNs / instant-NGP-style fields, where the network learns an image
-or field and a shader evaluates it per pixel). That needs only hand-written fused
-forward+backward kernels for fixed architectures (an N-layer MLP), an Adam optimizer kernel, and
-a loss kernel — a small module in `@vgpu/ml-kernels`, not a framework. General autodiff over the
-graph IR stays explicitly out of scope; tfjs remains the answer for training arbitrary models.
+1. **Inject vgpu's device into the runtime.** tfjs supports this cleanly
+   (`new WebGPUBackend(device)` + `tf.registerBackend`). For ORT, device injection must be
+   verified against the current release during the milestone-0 spike (the `env.webgpu` surface
+   has changed across versions).
+2. **vgpu adopts an external device: `init({ device })`.** If a runtime insists on creating its
+   own device, vgpu wraps that one instead. This is a small, generally useful core addition
+   (embedding vgpu into any existing WebGPU app) and makes the integration robust against
+   runtime API churn. This is the fallback that guarantees the plan works regardless of what the
+   ORT spike finds.
 
 ## Required additions to existing vgpu packages
 
-These are prerequisites, worth landing as standalone PRs because they help all compute users:
+1. **`init({ device })`** — construct the vgpu context over an externally created `GPUDevice`
+   (mechanism 2 above).
+2. **External buffer wrapping** — `packages/vgpu-api/src/storage.ts` wraps core `Buffer`s;
+   the `Tensor` facade needs a sibling that wraps a foreign `GPUBuffer` with a stable resource
+   identity for the binding cache, plus explicit lifetime rules (the runtime owns the buffer;
+   vgpu must invalidate bindings on release — ORT and tfjs both recycle output buffers, so the
+   facade API must make "valid until next run/dispose" explicit).
+3. **External image import** — `gpu.videoTexture(source)` for
+   `HTMLVideoElement`/`VideoFrame`/`ImageBitmap`/canvas via `copyExternalImageToTexture`; no such
+   path exists in `@vgpu/core` today.
+4. **Feature helpers** — `gpu.features.has("shader-f16")` etc., so adapters can report what the
+   shared device enables for the runtime (ORT WebGPU benefits from f16).
 
-1. **Batched compute encoding.** `Compute.dispatch()` currently creates and submits one encoder
-   per call (`packages/vgpu-api/src/compute.ts`). Needed: compute passes on `Frame`
-   (`frame.compute(cb)` encoding many dispatches into the frame's encoder) or an equivalent
-   multi-dispatch recorder. A 100-layer model must be one submit.
-2. **External image import.** No `copyExternalImageToTexture` path exists in
-   `@vgpu/core`/`vgpu` today. Needed: `gpu.videoTexture(source)` /
-   `texture.writeExternal(source)` for `HTMLVideoElement`/`VideoFrame`/`ImageBitmap`/canvas.
-3. **Sub-range buffer bindings.** `set-resources.ts` always binds `{ offset: 0, size: full }`.
-   The memory arena needs `{ buffer, offset, size }` binding views (offset-aligned to
-   `minStorageBufferOffsetAlignment`).
-4. **Feature/limit ergonomics.** `requiredFeatures` passthrough already exists; add detection
-   helpers (`gpu.features.has("shader-f16")`) so kernels can select f16 variants, and optional
-   `timestamp-query` plumbing for the profiler.
-5. **External buffer wrapping** (bridge mode): wrap a foreign `GPUBuffer` as a bindable storage
-   facade with a stable resource identity.
+Notably *not* required anymore: batched compute encoding and sub-range storage bindings. The
+runtimes own their own encoders; vgpu's pre/post kernels are 1–2 dispatches per frame, fine
+through the existing `gpu.compute()` path. Both remain nice-to-haves for general compute users
+but are off this plan's critical path.
+
+## What "optimal" means here, concretely
+
+- **Session-level optimization is the runtime's job**: ORT fuses and plans at
+  `createSession()`; we pass the right session options (WebGPU EP, GPU output location,
+  free-dimension overrides for fixed input sizes) rather than owning kernels.
+- **The adapter's job is to make the seams free**: no CPU roundtrip for image-sized tensors
+  (masks, feature maps) in either direction; preprocessing on-GPU; `await session.run()` as the
+  only sync point per frame.
+- **Small outputs don't need heroics**: landmark sets (hands/face/pose) are a few KB — reading
+  them back and uploading as uniforms is negligible. Zero-copy matters for image-sized tensors;
+  the API supports both paths and the docs say when each is appropriate.
+- **Measure, don't assume**: the example apps double as benchmarks (frame time with/without I/O
+  binding, tfjs vs ORT on the same model) using vgpu's measuring docs conventions.
 
 ## Testing strategy
 
-- **Mock adapter**: parser, planner, memory-arena, and encoding-shape tests run deterministically
-  on `vgpu/mock` (dispatch counts, binding layouts, buffer reuse assertions).
-- **Node/Dawn adapter**: numeric correctness per kernel and per model against golden outputs
-  generated by tfjs-cpu in a script (checked-in `.npy`-style fixtures, tolerance-based compare,
-  looser tolerances for f16). Runs in the existing `infra/test-docker` lanes.
-- **Examples as acceptance tests**: an `examples/ml-segmentation` app (webcam → selfie
-  segmentation → shader composite) and a headless Node render producing a snapshot, following the
-  existing `by-example-*` pattern.
+- **Mock adapter**: interop-layer unit tests (facade identity/binding behavior, pre/post kernel
+  encoding shapes, lifetime invalidation) run deterministically on `vgpu/mock`.
+- **Node/Dawn**: pre/post kernels verified numerically (golden fixtures); adapter smoke tests run
+  a tiny ONNX/tfjs model end-to-end where the runtime supports Node WebGPU, otherwise
+  browser-lane tests per `docs/topics/browser-testing.docs.md`.
+- **Examples as acceptance tests**: `examples/ml-segmentation` (webcam → ORT segmentation →
+  shader composite) and `examples/ml-training-viz` (tfjs `model.fit()` visualized live),
+  following the `by-example-*` pattern.
 
 ## Milestones
 
 | # | Deliverable | Depends on |
 | --- | --- | --- |
-| 0 | Core prerequisites: batched compute pass, external image import, sub-range bindings | — |
-| 1 | `@vgpu/ml-tfjs` bridge: shared-device tfjs backend, zero-copy in/out, webcam→segmentation→shader demo; includes a live-training demo (`model.fit()` visualized by a shader mid-training) | 0 (partial) |
-| 2 | Tensor layer + `@vgpu/ml-kernels` MVP (matmul, conv, depthwise, elementwise, softmax, resize) with golden tests | 0 |
-| 3 | GraphModel parser + planner + executor; first real model (selfie segmentation) running natively, output-parity vs bridge mode | 2 |
-| 4 | Second model class (face/hand landmarks), LayersModel lowering, quantized weights | 3 |
-| 5 | Perf pass: fusion coverage, f16 kernels, arena tuning, timestamp profiler, workgroup autotune | 3 |
-| 6 | Exploratory transformer track: layernorm/gelu/attention kernels, KV cache, tiny transformer (e.g. char-level) generating on-GPU | 2, 5 |
-| 7 | Exploratory native training track (tier 2): fused MLP forward+backward, Adam and loss kernels, neural-texture live-training demo | 2 |
-
-Milestone 1 is the demo-able moment ("media pipe → shader" works end to end); milestones 2–5
-replace its internals without changing the app-facing API.
+| 0 | Spike: verify ORT WebGPU device injection + GPU I/O binding against current release; verify tfjs shared-device registration; decide inject vs adopt per runtime | — |
+| 1 | Core additions: `init({ device })`, external buffer wrapping with lifetime rules, `gpu.videoTexture()` | 0 |
+| 2 | `@vgpu/ml` interop layer: `Tensor` facade + pre/post kernels, mock + Dawn tests | 1 |
+| 3 | `@vgpu/ml-tfjs`: shared device, zero-copy wrap, training-visualization example | 2 |
+| 4 | `@vgpu/ml-ort`: session wrapper with I/O binding, webcam→segmentation→shader example, benchmark vs tfjs on the same model | 2 |
+| 5 | Polish: docs topic ("ML on vgpu"), model-format guidance (export-to-ONNX recipes for Keras/PyTorch/MediaPipe), profiling notes, examples gallery | 3, 4 |
 
 ## Risks and open questions
 
-- **Op coverage long tail.** TF graphs use hundreds of ops. Mitigation: fail-fast diagnostics,
-  prioritize by target models, keep bridge mode as the escape hatch for uncovered models.
-- **MediaPipe format reality.** Current MediaPipe Solutions ship TFLite models; the
-  tfjs-converted versions live in `@tensorflow-models/*` GraphModel form — v1 targets those.
-  A TFLite flatbuffer front-end is a possible later parser reusing the same IR.
-- **Precision.** f16 doubles matmul throughput but some landmark models are f16-sensitive;
-  per-model precision policy with f32 fallback, decided by the golden-test tolerances.
-- **"LLM" scope.** True in-browser LLMs in tfjs format are effectively nonexistent; serious LLM
-  inference would mean a GGUF/safetensors front-end on the same kernel/executor layers. Kept
-  explicitly as the milestone-6 exploration rather than a v1 promise.
-- **Naming.** `@vgpu/ml` vs a `vgpu/ml` subpath of the main package: proposed as a separate
-  package so the main bundle stays slim (there is a bundle-size check in CI).
+- **ORT device injection** may not be supported in the current release — mitigated by
+  `init({ device })` adoption (milestone 1), which works regardless.
+- **Output buffer lifetimes**: both runtimes recycle GPU buffers between runs; the facade's
+  "valid until next run" contract must be enforced (invalidate-on-reuse), or apps get silent
+  stale reads. This is the main correctness risk of the whole plan and gets dedicated tests.
+- **MediaPipe models** ship as TFLite; for the ORT path they need one-time conversion to ONNX
+  (documented recipe), or use the tfjs-converted versions via the tfjs adapter. No runtime work,
+  but real DX friction to document honestly.
+- **Bundle size**: adapters keep runtimes as peer dependencies so `vgpu` itself stays slim
+  (CI bundle-size check unaffected); apps opt into the runtime they use.
+- **WASM/threads headers**: ORT's WASM fallback and threading want COOP/COEP headers; examples
+  must document server config so the WebGPU EP is actually used.
