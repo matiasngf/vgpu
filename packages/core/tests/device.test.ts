@@ -40,3 +40,11 @@ test("Device.isCompatibilityMode defaults false and can be set by adapters", () 
   expect(new Device(gpu).isCompatibilityMode).toBe(false);
   expect(new Device(gpu, null, { isCompatibilityMode: true }).isCompatibilityMode).toBe(true);
 });
+
+test("mock command encoder implements the copy methods callers reach for", () => {
+  const encoder = createMockGPUDevice().createCommandEncoder();
+
+  for (const method of ["copyBufferToBuffer", "copyTextureToBuffer", "copyTextureToTexture"] as const) {
+    expect(typeof encoder[method], `encoder.${method} is missing from the mock`).toBe("function");
+  }
+});

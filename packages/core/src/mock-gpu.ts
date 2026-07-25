@@ -111,6 +111,7 @@ export function createMockGPUDevice(): GPUDevice {
       return {
         copyBufferToBuffer() {},
         copyTextureToBuffer() {},
+        copyTextureToTexture() {},
         beginComputePass: () => ({ setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }) as unknown as GPUComputePassEncoder,
         // Mock render pass encoder: only binding/pipeline/draw/bundle/end methods used by tests are implemented.
         beginRenderPass: () => ({ setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, setPipeline() {}, executeBundles() {}, draw() {}, drawIndexed() {}, end() {} }) as unknown as GPURenderPassEncoder,

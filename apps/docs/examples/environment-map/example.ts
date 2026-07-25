@@ -1,8 +1,10 @@
 import type { Draw, Effect, Frame, Gpu, Mesh, Surface, Target } from 'vgpu';
+import type { Texture } from 'vgpu/core';
 import { box } from 'vgpu/scene';
 import { cameraView, spinMatrix, type CameraView } from './camera';
 import { installOrbitInput } from './controls';
 import skyWgsl from './sky.wgsl';
+import blurWgsl from './blur.wgsl';
 import metalWgsl from './metal.wgsl';
 import presentWgsl from './present.wgsl';
 
@@ -12,8 +14,14 @@ interface ThumbOptions { warmupFrames?: number; dt?: number; time?: number }
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 /** 2:1 is the equirectangular aspect: 360° of yaw by 180° of pitch. */
 const ENV_SIZE: readonly [number, number] = [2048, 1024];
+/** Levels of the prefiltered pyramid: 2048×1024 down to 16×8. */
+const ENV_LEVELS = 8;
+/** Gaussian radius in destination texels; ~1 keeps each level one octave blurrier. */
+const BLUR_RADIUS = 1.15;
 const CUBE_SIZE = 1.25;
 const EXPOSURE = 0.9;
+/** Angle covered by one texel of level 0, the unit every LOD is measured against. */
+const TEXEL_ANGLE = (2 * Math.PI) / ENV_SIZE[0];
 
 const SKY = {
   sun_direction: [-0.724, 0.09, -0.684],
@@ -31,12 +39,17 @@ const SKY = {
 const METAL = {
   /** Normal-incidence reflectance of polished chrome; Fresnel takes the rest to white. */
   base_color: [0.56, 0.57, 0.58],
-  /** Half-angle of the reflection cone, in radians. 0 is a perfect mirror. */
-  roughness: 0.008,
+  /**
+   * Half-angle of the reflection cone, in radians. 0 is a perfect mirror; raising it
+   * walks up the prefiltered pyramid, so satin metal costs exactly the same one fetch.
+   */
+  roughness: 0.0,
+  texel_angle: TEXEL_ANGLE,
+  env_size: ENV_SIZE,
 } as const;
 
 interface Scene {
-  readonly env: Target;
+  readonly env: Texture;
   readonly hdr: Target;
   readonly mesh: Mesh;
   readonly cube: Draw;
@@ -94,18 +107,19 @@ export async function renderThumb(gpu: Gpu, output: Target, opts: ThumbOptions =
 }
 
 async function createScene(gpu: Gpu, output: Output): Promise<Scene> {
-  const env = gpu.target({ size: [...ENV_SIZE], format: HDR_FORMAT, label: 'environment-map-env' });
   const hdr = gpu.target({ size: output.size, format: HDR_FORMAT, depth: true, label: 'environment-map-scene' });
   const envSampler = gpu.sampler({
     minFilter: 'linear',
     magFilter: 'linear',
+    // Trilinear: roughness lands on a fractional LOD, so neighbouring levels must blend.
+    mipmapFilter: 'linear',
     // u wraps the horizon; v must clamp so the poles never bleed across.
     addressModeU: 'repeat',
     addressModeV: 'clamp-to-edge',
   });
   const sceneSampler = gpu.sampler({ minFilter: 'linear', magFilter: 'linear' });
 
-  await bakeEnvironment(gpu, env);
+  const env = await bakeEnvironment(gpu, envSampler);
 
   const mesh = gpu.mesh(box({ size: CUBE_SIZE }));
   const cube = gpu.draw({ shader: metalWgsl, mesh, label: 'environment-map-metal' });
@@ -119,27 +133,75 @@ async function createScene(gpu: Gpu, output: Output): Promise<Scene> {
 }
 
 /**
- * One-shot pass that fills the equirectangular map; nothing re-runs it per frame.
+ * Fills the equirectangular map and its prefiltered pyramid, once, at startup.
+ *
+ * Level 0 is the sky itself; every level below is the previous one run through a
+ * separable Gaussian while the resolution halves, so level L carries roughly 2^L texels
+ * of angular blur. Shading reads roughness back out with a single `textureSampleLevel`
+ * instead of tracing a cone of taps per pixel.
  *
  * The map is baked procedurally so the example stays self-contained and renders the same
- * frame headlessly. To use a real 360° photo instead, replace this call with an upload and
- * hand the resulting texture to `set({ env_tex })` — nothing downstream changes:
+ * frame headlessly. To use a real 360° photo instead, upload it into level 0 and keep the
+ * downsample loop for the rest:
  *
  * ```ts
  * const bitmap = await createImageBitmap(await (await fetch('/hdri.png')).blob());
- * const env = gpu.device.createTexture({
- *   size: [bitmap.width, bitmap.height],
- *   format: 'rgba8unorm',
- *   usage: ['texture_binding', 'copy_dst', 'render_attachment'],
- * });
  * gpu.gpu.queue.copyExternalImageToTexture({ source: bitmap }, { texture: env.gpu }, [bitmap.width, bitmap.height]);
  * ```
  */
-async function bakeEnvironment(gpu: Gpu, env: Target): Promise<void> {
-  const bake = gpu.effect(skyWgsl, { label: 'environment-map-sky' });
-  bake.set({ sky: SKY });
-  await bake.compile(env);
-  gpu.frame((frame) => frame.pass({ target: env }, (pass) => pass.draw(bake)));
+async function bakeEnvironment(gpu: Gpu, sampler: GPUSampler): Promise<Texture> {
+  const env = gpu.device.createTexture({
+    size: [...ENV_SIZE],
+    format: HDR_FORMAT,
+    mipLevelCount: ENV_LEVELS,
+    usage: ['texture_binding', 'copy_dst'],
+    label: 'environment-map-env',
+  });
+
+  const sky = gpu.effect(skyWgsl, { label: 'environment-map-sky' });
+  sky.set({ sky: SKY });
+  const blur = gpu.effect(blurWgsl, { label: 'environment-map-blur' });
+
+  let source = gpu.target({ size: [...ENV_SIZE], format: HDR_FORMAT, label: 'environment-map-level0' });
+  await Promise.all([sky.compile(source), blur.compile(source)]);
+  gpu.frame((frame) => frame.pass({ target: source }, (pass) => pass.draw(sky)));
+  copyIntoLevel(gpu, source, env, 0);
+
+  for (let level = 1; level < ENV_LEVELS; level++) {
+    const size: [number, number] = [
+      Math.max(1, ENV_SIZE[0] >> level),
+      Math.max(1, ENV_SIZE[1] >> level),
+    ];
+    const horizontal = gpu.target({ size, format: HDR_FORMAT, label: `environment-map-blur-h${level}` });
+    const vertical = gpu.target({ size, format: HDR_FORMAT, label: `environment-map-level${level}` });
+    const texel: [number, number] = [1 / size[0], 1 / size[1]];
+
+    // One frame per pass so each draw picks up its own bindings. This runs once, at
+    // startup — the per-frame path below never touches it.
+    blur.set({ src: source, src_samp: sampler, blur: { texel, direction: [1, 0], radius: BLUR_RADIUS, equirect_compensation: 1 } });
+    gpu.frame((frame) => frame.pass({ target: horizontal }, (pass) => pass.draw(blur)));
+    blur.set({ src: horizontal, src_samp: sampler, blur: { texel, direction: [0, 1], radius: BLUR_RADIUS, equirect_compensation: 0 } });
+    gpu.frame((frame) => frame.pass({ target: vertical }, (pass) => pass.draw(blur)));
+
+    copyIntoLevel(gpu, vertical, env, level);
+    destroyTarget(horizontal);
+    destroyTarget(source);
+    source = vertical;
+  }
+  destroyTarget(source);
+
+  return env;
+}
+
+/** A render pass cannot write into a mip level of another texture, so levels are copied in. */
+function copyIntoLevel(gpu: Gpu, source: Target, env: Texture, level: number): void {
+  const encoder = gpu.gpu.createCommandEncoder({ label: `environment-map-copy-level${level}` });
+  encoder.copyTextureToTexture(
+    { texture: source.color.gpu },
+    { texture: env.gpu, mipLevel: level },
+    [source.size[0], source.size[1], 1],
+  );
+  gpu.gpu.queue.submit([encoder.finish()]);
 }
 
 function render(frame: Frame, scene: Scene, output: Output, view: CameraView, time: number): void {
@@ -158,6 +220,8 @@ function render(frame: Frame, scene: Scene, output: Output, view: CameraView, ti
       exposure: EXPOSURE,
       up: view.up,
       background_intensity: 1,
+      texel_angle: TEXEL_ANGLE,
+      env_size: ENV_SIZE,
     },
   });
 
@@ -171,7 +235,10 @@ function aspectOf(output: Output): number {
 }
 
 function destroyScene(scene: Scene): void {
-  for (const target of [scene.hdr, scene.env]) {
-    (target as Target & { destroy?: () => void }).destroy?.();
-  }
+  destroyTarget(scene.hdr);
+  scene.env.destroy();
+}
+
+function destroyTarget(target: Target): void {
+  (target as Target & { destroy?: () => void }).destroy?.();
 }
