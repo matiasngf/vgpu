@@ -3,7 +3,7 @@ import { box } from 'vgpu/scene';
 import { cameraView, spinMatrix, type CameraView } from './camera';
 import { installOrbitInput } from './controls';
 import skyWgsl from './sky.wgsl';
-import glassWgsl from './glass.wgsl';
+import metalWgsl from './metal.wgsl';
 import presentWgsl from './present.wgsl';
 
 type Output = Surface | Target;
@@ -28,12 +28,11 @@ const SKY = {
   ground_scale: 1.7,
 } as const;
 
-const GLASS = {
-  ior: 1.47,
-  dispersion: 0.045,
-  absorption: 0.26,
-  half_extent: CUBE_SIZE / 2,
-  edge_tint: 0.3,
+const METAL = {
+  /** Normal-incidence reflectance of polished chrome; Fresnel takes the rest to white. */
+  base_color: [0.56, 0.57, 0.58],
+  /** Half-angle of the reflection cone, in radians. 0 is a perfect mirror. */
+  roughness: 0.008,
 } as const;
 
 interface Scene {
@@ -109,8 +108,8 @@ async function createScene(gpu: Gpu, output: Output): Promise<Scene> {
   await bakeEnvironment(gpu, env);
 
   const mesh = gpu.mesh(box({ size: CUBE_SIZE }));
-  const cube = gpu.draw({ shader: glassWgsl, mesh, label: 'environment-map-glass' });
-  cube.set({ ...GLASS, env_tex: env, env_samp: envSampler });
+  const cube = gpu.draw({ shader: metalWgsl, mesh, label: 'environment-map-metal' });
+  cube.set({ ...METAL, env_tex: env, env_samp: envSampler });
 
   const present = gpu.effect(presentWgsl, { label: 'environment-map-present' });
   present.set({ env_tex: env, env_samp: envSampler, scene_tex: hdr, scene_samp: sceneSampler });
