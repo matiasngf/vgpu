@@ -23,6 +23,7 @@ const rendererEntries = [
   { slug: 'anti-aliasing', module: '../examples/anti-aliasing/renderer.ts', exportName: 'renderThumbnail' },
   { slug: 'post-processing', module: '../examples/post-processing/renderer.ts', exportName: 'renderThumbnail' },
   { slug: 'black-hole', module: '../examples/black-hole/renderer.ts', exportName: 'renderThumbnail' },
+  { slug: 'earth', module: '../examples/earth/renderer.ts', exportName: 'renderThumbnail' },
   { slug: 'fluid', module: '../examples/fluid/renderer.ts', exportName: 'renderThumbnail' },
   { slug: 'instanced-rendering', module: '../examples/instanced-rendering/renderer.ts', exportName: 'renderThumbnail' },
   { slug: 'batch-rendering', module: '../examples/batch-rendering/renderer.ts', exportName: 'renderThumbnail' },
