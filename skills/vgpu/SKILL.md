@@ -34,10 +34,15 @@ Docs app workflows live in `apps/docs/README.md`. Use it when you need to re-bak
 - **Frames** — A frame is one unit of GPU work.  `references/guides/concepts-frames.docs.md`
 - **Render bundles** — A render loop re-encodes every pipeline, bind group, and draw on every tick — even when nothing changed.  `references/guides/concepts-render-bundles.docs.md`
 
+## CLI reference
+
+- **CLI** — vgpu CLI commands, arguments, flags, and exit codes.  `references/guides/cli.docs.md`
+
 ## Performance guides
 
 Writing or optimizing a shader? Read **performance-model** first, then the rest as needed.
 
+- **WebGPU screenshots with agent-browser** — Use agent-browser to verify and capture vgpu previews that run WebGPU on Linux, including containers without a GPU.  `references/guides/agent-browser-webgpu.docs.md`
 - **Authoring shaders for performance** — Write WGSL so reflection can build stable layouts.  `references/guides/authoring-for-perf.docs.md`
 - **Browser testing with Playwright WebGPU** — Browser tests should exercise the same public API users copy: init(), gpu.surface(canvas, opts), explicit targets, and deterministic frame submission.  `references/guides/browser-testing.docs.md`
 - **Getting started** — Start with the public vgpu package.  `references/guides/getting-started.docs.md`
@@ -50,8 +55,9 @@ Writing or optimizing a shader? Read **performance-model** first, then the rest 
 
 ## API reference
 
-196 symbols across 15 packages — open `references/<package>/<file>` or `npx --package @vgpu/cli vgpu docs cat <symbol>`:
+198 symbols across 16 packages — open `references/<package>/<file>` or `npx --package @vgpu/cli vgpu docs cat <symbol>`:
 
+- `@vgpu/adapter-node` — createNodeAdapter, createNodeDevice
 - `@vgpu/render/edit` — bevel, bridge, dissolveEdges, dissolveFaces, dissolveVertices, EdgeView, EditableMesh, EditableMeshValue, ElementDomain, ElementSelection, ElementSet, extrude, FaceView, fillHole, gridFill, healManifold, inset, KernelHandle, loopCut, mergeByDistance, MeshEditError, MeshEditWarning, recomputeNormals, ScoredSelection, subdivideEdges, subdivideFaces, toEditable, toEditableWithDiagnostics, VertexView
 - `@vgpu/render/inspect` — InspectMaterial, InspectMaterialUniformParams, meshToReadable, meshToWireframe, normalDebugMaterial, NormalDebugMaterialSpec, wireframeMaterial, WireframeMaterialSpec, WireframeMesh
 - `@vgpu/render/perf` — gpuFrameTime, GpuFrameTimeOptions, GpuFrameTimeResult, pixelDiff, PixelDiffResult

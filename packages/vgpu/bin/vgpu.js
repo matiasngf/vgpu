@@ -6,7 +6,9 @@ import { runCheck } from "../lib/check/run.js";
 import { runDocs } from "../lib/docs/run.js";
 import { runDoctor } from "../lib/doctor/run.js";
 import { runInstallDawn } from "../lib/install-dawn/run.js";
+import { runInstallSoftwareRenderer } from "../lib/install-software-renderer/run.js";
 import { runSnapshotCommand } from "../lib/snapshot/run.js";
+import { runExamples } from "../lib/examples/run.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageJson = JSON.parse(readFileSync(resolve(here, "../package.json"), "utf8"));
@@ -24,8 +26,10 @@ Rendering in Node? Check the environment first:
 Commands:
   check      Validate and reflect a WGSL file as JSON
   docs       Explore bundled VGPU documentation
+  examples   Inspect canonical gallery source (never executes code)
   snapshot   Compare the representative GPU pixel snapshot
   install-dawn  Download and verify the portable Node Dawn prebuild
+  install-software-renderer  Download and verify the portable CPU renderer
   doctor     Verify this machine can render headless (JSON verdict + fixes)
   wgsl       Coming soon
 
@@ -62,8 +66,10 @@ export function runCli(args) {
   if (command === "--version" || command === "-v") return { code: 0, stdout: `${VERSION}\n` };
   if (command === "check") return runCheck(rest);
   if (command === "docs") return runDocs(rest);
+  if (command === "examples") return runExamples(rest, { version: VERSION });
   if (command === "snapshot") return runSnapshotCommand({ args: rest });
   if (command === "install-dawn") return runInstallDawn(rest);
+  if (command === "install-software-renderer") return runInstallSoftwareRenderer(rest);
   if (command === "doctor") return runDoctor(rest);
   if (command === "wgsl") return { code: 1, stderr: comingSoon(command) };
   return { code: 1, stderr: `Unknown vgpu command: ${command}\n\n${help}` };
