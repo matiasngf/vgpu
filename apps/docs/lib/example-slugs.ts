@@ -4,6 +4,7 @@ export const exampleSlugs = [
   'anti-aliasing',
   'post-processing',
   'black-hole',
+  'earth',
   'fluid',
   'instanced-rendering',
   'batch-rendering',

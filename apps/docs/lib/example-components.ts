@@ -13,6 +13,7 @@ export const exampleComponentLoaders = {
   'anti-aliasing': () => import('../examples/anti-aliasing/index'),
   'post-processing': () => import('../examples/post-processing/index'),
   'black-hole': () => import('../examples/black-hole/index'),
+  earth: () => import('../examples/earth/index'),
   fluid: () => import('../examples/fluid/index'),
   'instanced-rendering': () => import('../examples/instanced-rendering/index'),
   'batch-rendering': () => import('../examples/batch-rendering/index'),

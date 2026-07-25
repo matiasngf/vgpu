@@ -7,6 +7,7 @@ import { meta as triangleLedFrontMeta } from '../examples/triangle-led-front/met
 import { meta as antiAliasingMeta } from '../examples/anti-aliasing/meta';
 import { meta as postProcessingMeta } from '../examples/post-processing/meta';
 import { meta as blackHoleMeta } from '../examples/black-hole/meta';
+import { meta as earthMeta } from '../examples/earth/meta';
 import { meta as fluidMeta } from '../examples/fluid/meta';
 import { meta as instancedRenderingMeta } from '../examples/instanced-rendering/meta';
 import { meta as batchRenderingMeta } from '../examples/batch-rendering/meta';
@@ -19,6 +20,7 @@ const rawMetadata = {
   'anti-aliasing': antiAliasingMeta,
   'post-processing': postProcessingMeta,
   'black-hole': blackHoleMeta,
+  earth: earthMeta,
   fluid: fluidMeta,
   'instanced-rendering': instancedRenderingMeta,
   'batch-rendering': batchRenderingMeta,
@@ -40,6 +42,7 @@ export const exampleMetadataBySlug = {
   'anti-aliasing': withThumbnails(rawMetadata['anti-aliasing']),
   'post-processing': withThumbnails(rawMetadata['post-processing']),
   'black-hole': withThumbnails(rawMetadata['black-hole']),
+  earth: withThumbnails(rawMetadata.earth),
   fluid: withThumbnails(rawMetadata.fluid),
   'instanced-rendering': withThumbnails(rawMetadata['instanced-rendering']),
   'batch-rendering': withThumbnails(rawMetadata['batch-rendering']),

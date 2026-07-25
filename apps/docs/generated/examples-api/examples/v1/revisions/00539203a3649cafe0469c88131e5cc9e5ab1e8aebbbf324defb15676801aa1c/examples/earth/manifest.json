@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "contractId": "vgpu-examples/v1",
+  "revision": "00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c",
+  "id": "earth",
+  "title": "Earth",
+  "description": "A procedural planet with GPU-baked albedo, night lights and clouds, a lit atmosphere, and an HDR bloom chain tuned so only the sun glows.",
+  "tags": [
+    "lighting",
+    "hdr",
+    "bloom",
+    "rendering"
+  ],
+  "capabilities": [
+    "webgpu",
+    "pointer-orbit",
+    "controls",
+    "multi-pass",
+    "continuous-rendering",
+    "responsive-canvas",
+    "textures"
+  ],
+  "aggregateSha256": "bb3e75cce56bc3e2c14dd05dde8a1fe6a0ab44dc75709413ead63e58f9d7f15b",
+  "files": [
+    {
+      "path": "index.tsx",
+      "contentType": "text/typescript",
+      "size": 1556,
+      "sha256": "796c1b9fec909fb1277f72656ed1bca158fc95d1c800272464b75a990f6c37e1",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/index.tsx.raw"
+    },
+    {
+      "path": "controls.tsx",
+      "contentType": "text/typescript",
+      "size": 1259,
+      "sha256": "388b4ecc8dc55cd1e443fed4d66964f981d1dce1a406b69517f0c757c296e6ab",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/controls.tsx.raw"
+    },
+    {
+      "path": "types.ts",
+      "contentType": "text/typescript",
+      "size": 194,
+      "sha256": "49cbe2a2ada90cd1a138c8683916d1b747967b83a2f081c0a7b0218f1996bcf9",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/types.ts.raw"
+    },
+    {
+      "path": "renderer.ts",
+      "contentType": "text/typescript",
+      "size": 18110,
+      "sha256": "d76e126d98eaedd4a26ce8a2b54e6228d03a26fb0cc03e86735e93231cb43f0f",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/renderer.ts.raw"
+    },
+    {
+      "path": "planet.ts",
+      "contentType": "text/typescript",
+      "size": 4338,
+      "sha256": "05da757d1b3989ce9d779efca206dd3d8f19eee879034cb792629b16405225c6",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/planet.ts.raw"
+    },
+    {
+      "path": "planet-common.wgsl",
+      "contentType": "text/wgsl",
+      "size": 5676,
+      "sha256": "dc42d7867102e1da5db29209e5383f7e5947391fe07c4c294c89e817a793be7b",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/planet-common.wgsl.raw"
+    },
+    {
+      "path": "bake-surface.wgsl",
+      "contentType": "text/wgsl",
+      "size": 4334,
+      "sha256": "a9e8d7167d432f67d20dbfe1199dbdc02b065f5ff7a9a982b8e706dbcfe26d5c",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/bake-surface.wgsl.raw"
+    },
+    {
+      "path": "bake-clouds.wgsl",
+      "contentType": "text/wgsl",
+      "size": 2163,
+      "sha256": "d3c1349d30f56b769d93353bcab37d5bedbefb1e8983ec855b150513b1fb1168",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/bake-clouds.wgsl.raw"
+    },
+    {
+      "path": "sky.wgsl",
+      "contentType": "text/wgsl",
+      "size": 4405,
+      "sha256": "8d61d9ccc649e6f4c640d6ca86394fcf234144c2db75948a9cdd5a5a9969d6a7",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/sky.wgsl.raw"
+    },
+    {
+      "path": "earth.wgsl",
+      "contentType": "text/wgsl",
+      "size": 6954,
+      "sha256": "07f1427e2ab676e1c875a6ffda4ba4342de1c9e820d367ef98e1d0b93e6ae2d4",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/earth.wgsl.raw"
+    },
+    {
+      "path": "atmosphere.wgsl",
+      "contentType": "text/wgsl",
+      "size": 2278,
+      "sha256": "716d48372bb68c1f9ba1f67528c8829f9ef98b8be4de784e813b134d370fc441",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/atmosphere.wgsl.raw"
+    },
+    {
+      "path": "overlay.wgsl",
+      "contentType": "text/wgsl",
+      "size": 727,
+      "sha256": "5b2260000eb1c712cdda95220b9d58bd60ee756f2e99ad6a41f16094aebf5b73",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/overlay.wgsl.raw"
+    },
+    {
+      "path": "bright-pass.wgsl",
+      "contentType": "text/wgsl",
+      "size": 1007,
+      "sha256": "42a4e231746439655927b375df9f761859d3902d3142ac05dcae899271f72f21",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/bright-pass.wgsl.raw"
+    },
+    {
+      "path": "blur.wgsl",
+      "contentType": "text/wgsl",
+      "size": 1002,
+      "sha256": "6a7559a619ef6001fa8cb003730655c512e50361ea140e00b03a0b31474974c1",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/blur.wgsl.raw"
+    },
+    {
+      "path": "composite.wgsl",
+      "contentType": "text/wgsl",
+      "size": 3173,
+      "sha256": "9eeff3f8256d26f283404a4aa2993191c7fc479ba5ff3c02885b281ce379d9f6",
+      "url": "https://vgpu.labs.vercel.dev/api/examples/v1/revisions/00539203a3649cafe0469c88131e5cc9e5ab1e8aebbbf324defb15676801aa1c/examples/earth/files/composite.wgsl.raw"
+    }
+  ]
+}
