@@ -26,6 +26,7 @@ const customRendererEntries = [
   { slug: 'instanced-rendering', module: '../examples/instanced-rendering/example.ts', exportName: 'renderThumb' },
   { slug: 'batch-rendering', module: '../examples/batch-rendering/example.ts', exportName: 'renderThumb' },
   { slug: 'fft-ocean', module: '../examples/fft-ocean/example.ts', exportName: 'renderThumb' },
+  { slug: 'environment-map', module: '../examples/environment-map/example.ts', exportName: 'renderThumb' },
 ];
 
 const sizes = args.proofDir ? { proof: [160, 90] } : {
