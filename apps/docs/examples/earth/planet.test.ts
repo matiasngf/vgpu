@@ -20,7 +20,7 @@ describe('earth sun', () => {
     }
   });
 
-  it('starts pointing along +X, the same seed direction as the three.js original', () => {
+  it('starts pointing along +X at the configured seed direction', () => {
     const [x, y, z] = sunDirection(0);
     expect(x).toBeCloseTo(Math.cos((13 * Math.PI) / 180), 6);
     expect(y).toBeCloseTo(Math.sin((13 * Math.PI) / 180), 6);
