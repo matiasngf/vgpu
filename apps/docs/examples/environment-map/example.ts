@@ -25,7 +25,7 @@ const TEXEL_ANGLE = (2 * Math.PI) / ENV_SIZE[0];
 
 const SKY = {
   sun_direction: [-0.724, 0.09, -0.684],
-  sun_angular_size: 0.05,
+  sun_angular_size: 0.018,
   sun_color: [1.0, 0.88, 0.72],
   sun_intensity: 26,
   zenith_color: [0.05, 0.15, 0.44],
@@ -33,7 +33,7 @@ const SKY = {
   horizon_color: [0.36, 0.48, 0.74],
   cloud_scale: 0.75,
   ground_color: [0.05, 0.05, 0.056],
-  ground_scale: 1.7,
+  ground_scale: 4.6,
 } as const;
 
 const METAL = {

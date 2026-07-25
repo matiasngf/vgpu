@@ -74,7 +74,7 @@ fn ground(direction: vec3f, sun: vec3f) -> vec3f {
   let depth = max(-direction.y, 0.001);
   let plane = direction.xz / depth * sky.ground_scale;
   // Tiles pack together toward the horizon, so their contrast fades with distance.
-  let fade = 1.0 / (1.0 + dot(plane, plane) * 0.02);
+  let fade = 1.0 / (1.0 + dot(plane, plane) * 0.006);
 
   var color = sky.ground_color * (1.0 + checker_box(plane, fwidth(plane) + vec2f(1e-3)) * 3.4);
   color *= 0.8 + fbm(plane * 0.3) * 0.6;
@@ -93,8 +93,8 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
 
   // Warm scattering around the sun, then the disk itself as a small very bright core.
   let sun_dot = clamp(dot(direction, sun), 0.0, 1.0);
-  color += sky.sun_color * pow(sun_dot, 26.0) * 0.22;
-  color += sky.sun_color * pow(sun_dot, 220.0) * 0.9;
+  color += sky.sun_color * pow(sun_dot, 60.0) * 0.2;
+  color += sky.sun_color * pow(sun_dot, 900.0) * 0.8;
   let disk = smoothstep(cos(sky.sun_angular_size * 2.2), cos(sky.sun_angular_size), sun_dot);
   color += sky.sun_color * sky.sun_intensity * disk;
 
