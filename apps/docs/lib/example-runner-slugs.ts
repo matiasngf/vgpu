@@ -8,6 +8,7 @@ export const exampleRunnerSlugs = [
   'instanced-rendering',
   'batch-rendering',
   'fft-ocean',
+  'earth',
 ] as const;
 
 export type ExampleRunnerSlug = (typeof exampleRunnerSlugs)[number];
