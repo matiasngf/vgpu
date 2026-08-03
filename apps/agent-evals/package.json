@@ -13,7 +13,7 @@
   "dependencies": {
     "ai": "^7.0.38",
     "eve": "0.29.5",
-    "zod": "^4.1.8"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

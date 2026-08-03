@@ -28,6 +28,15 @@ import { defineAgent } from "eve";
 // measures; adding a vgpu-aware tool here would hand the agent part of the
 // answer and silently invalidate everything the run tells us about
 // discoverability. Do not add one.
+//
+// EXCEPTION: `agent/tools/view-image.ts`. That one is not vgpu-aware — it is a
+// generic "look at an image file in your own workspace" capability, the same
+// affordance a real coding agent has through its IDE or chat UI. Withholding it
+// would model a situation that does not happen, exactly like naming `npx vgpu`
+// in a task prompt is not a leak. It never mentions vgpu, doctor, docs, shaders
+// or hover effects. Do not add a second tool under this reasoning: the
+// exception is deliberately narrow, and a vgpu-shaped tool would hand over the
+// discovery this suite exists to observe.
 export default defineAgent({
   // `||` not `??`: an unset variable and a variable set to the empty string
   // must behave the same. A CI input that is left blank arrives as "", which

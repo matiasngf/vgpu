@@ -34,6 +34,29 @@ export function tarballsDir(): string {
   return fromEnv ? resolve(fromEnv) : join(workDir(), "tarballs");
 }
 
+/**
+ * Root of the per-task seed trees (`agent/sandbox/tasks/<id>/`).
+ *
+ * This is OUR directory, walked with node:fs and materialized into /workspace by
+ * bootstrap. It is deliberately not `agent/sandbox/workspace/`, which is eve's
+ * own discovery convention: that one is a single fixed slot, mounted once ("At
+ * most one entry per agent; mounted." — eve's discover/manifest.ts), so it
+ * cannot express "one of several seeds, chosen at run time".
+ *
+ * Env-first for the same reason as everything else here: bootstrap executes in
+ * the runtime process, where a path derived from this module's URL resolves
+ * inside eve's dev-runtime snapshot and would miss the real seed files.
+ */
+export function tasksDir(): string {
+  const fromEnv = process.env.VGPU_EVALS_TASKS_DIR;
+  return fromEnv ? resolve(fromEnv) : join(PACKAGE_ROOT_FALLBACK, "agent", "sandbox", "tasks");
+}
+
+/** The seed tree for one task, copied into /workspace at bootstrap. */
+export function taskSeedDir(taskId: string): string {
+  return join(tasksDir(), taskId);
+}
+
 /** Everything captured for one session. */
 export function snapshotDir(sessionId: string): string {
   return join(workDir(), "snapshots", sessionId);

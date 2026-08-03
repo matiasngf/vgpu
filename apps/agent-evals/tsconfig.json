@@ -14,5 +14,9 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["agent/**/*.ts", "evals/**/*.ts", "scripts/**/*.mjs"]
+  "include": ["agent/**/*.ts", "evals/**/*.ts", "scripts/**/*.mjs"],
+  // Seed trees are inputs handed to the agent, not sources of this package.
+  // n1's next-env.d.ts references `next` types that only exist inside the
+  // sandbox, so typechecking them here would fail on a file that is correct.
+  "exclude": ["agent/sandbox/tasks/**"]
 }

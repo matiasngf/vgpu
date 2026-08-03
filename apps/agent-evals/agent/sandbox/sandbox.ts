@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { defineSandbox } from "eve/sandbox";
 import type { SandboxSession } from "eve/sandbox";
 // Plain .mjs on purpose: the pack script must run with bare `node` before
@@ -7,7 +7,8 @@ import type { SandboxSession } from "eve/sandbox";
 // the key derivation) keeps packer and consumer from ever disagreeing.
 import { sourceKey } from "../../scripts/pack-vgpu.mjs";
 import { extractJson } from "../lib/extract-json.ts";
-import { tarballsDir } from "../lib/paths.ts";
+import { tarballsDir, taskSeedDir } from "../lib/paths.ts";
+import { requireTaskId } from "../lib/task.ts";
 import { evalSandboxBackend } from "./backend.ts";
 
 const WORKSPACE = "/workspace";
@@ -170,39 +171,121 @@ const REMEDIES: { label: string; command: string }[] = [
 ];
 
 /**
- * Content key for the seed workspace (`agent/sandbox/workspace/`).
+ * Content key for the RUNNING TASK's seed tree (`agent/sandbox/tasks/<id>/`).
  *
  * Injected by the wrapper, which can see the real directory. The fallback is a
  * constant rather than a guess: under eve's dev runtime this module executes
  * from a snapshot, and a wrong path here would silently return the same key for
- * every workspace, which is exactly the staleness this is meant to prevent.
+ * every task, which is exactly the staleness this is meant to prevent.
  */
-function workspaceSeedKey(): string {
-  const injected = process.env.VGPU_EVALS_WORKSPACE_KEY;
+function taskSeedFingerprint(): string {
+  const injected = process.env.VGPU_EVALS_TASK_SEED_KEY;
   if (injected) return injected;
-  // Be loud. A constant fallback means every seed workspace hashes the same,
-  // which is precisely the stale-template bug this key exists to prevent: the
-  // agent silently gets the previous starter project and the run still looks
-  // healthy. Reachable by invoking `eve eval` directly instead of going through
+  // Be loud. A constant fallback means every seed tree hashes the same, which is
+  // precisely the stale-template bug this key exists to prevent: the agent
+  // silently gets the previous starter project and the run still looks healthy.
+  // Reachable by invoking `eve eval` directly instead of going through
   // `pnpm agent-evals`, which is a legitimate thing to do while debugging.
   console.warn(
-    "agent-evals: VGPU_EVALS_WORKSPACE_KEY is not set, so the sandbox template " +
-      "cannot be invalidated when the seed workspace changes. If you edited " +
-      "agent/sandbox/workspace/, run `pnpm agent-evals` (which sets it) or " +
-      "`rm -rf .eve` to force a rebuild.",
+    "agent-evals: VGPU_EVALS_TASK_SEED_KEY is not set, so the sandbox template " +
+      "cannot be invalidated when a task's seed files change. If you edited " +
+      "agent/sandbox/tasks/, run `pnpm agent-evals --task <id>` (which sets it) " +
+      "or `rm -rf .eve` to force a rebuild.",
   );
-  return "seed-unknown";
+  return "task-seed-unknown";
 }
+
+/**
+ * Copies one task's seed tree into /workspace, file by file.
+ *
+ * This replaces eve's own `agent/sandbox/workspace/` convention, which is a
+ * single fixed slot ("At most one entry per agent; mounted.") and therefore
+ * cannot express "one of several seeds, chosen at run time". Same mechanism the
+ * tarball step already uses, just generalized.
+ *
+ * Every seed file across the current tasks is text. A future binary seed asset
+ * needs `writeBinaryFile` behind an extension allowlist; it is not guessed here,
+ * because silently writing a PNG through a text write would corrupt it.
+ */
+async function seedTaskWorkspace(sandbox: SandboxSession, taskId: string): Promise<number> {
+  const root = taskSeedDir(taskId);
+  if (!existsSync(root)) {
+    throw fatal(
+      `bootstrap: task "${taskId}" has no seed directory at ${root}.\n` +
+        "  Every task needs one, even if it only holds a package.json.",
+    );
+  }
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else files.push(full);
+    }
+  };
+  walk(root);
+  for (const file of files) {
+    await sandbox.writeTextFile({
+      path: `${WORKSPACE}/${relative(root, file).split(sep).join("/")}`,
+      content: readFileSync(file, "utf8"),
+    });
+  }
+  return files.length;
+}
+
+/**
+ * Extra bootstrap work for one specific task, cached in its template.
+ *
+ * The split is deliberate: cache what is SLOW and invisible to the docs, leave
+ * everything fast and documented for the agent to discover and run itself.
+ * Chromium is ~110 MB and several minutes, and vgpu's own browser guide never
+ * mentions that Chrome for Testing has no arm64 build — so it is pre-warmed
+ * here. `agent-browser` itself is NOT installed: it is the literal first command
+ * in that guide, it takes seconds, and installing it would erase the discovery
+ * step the journey milestones exist to measure.
+ */
+const TASK_EXTRAS: Record<string, { label: string; command: string }[]> = {
+  "n1-hero-shader": [
+    {
+      label: "browser runtime libraries (Vulkan loader, Mesa, virtual X server)",
+      command: "apt-get update && apt-get install -y libvulkan1 mesa-vulkan-drivers xvfb xauth",
+    },
+    {
+      label: "playwright's chromium (Chrome for Testing publishes no arm64 build)",
+      command: "npm install -g playwright && npx playwright install chromium",
+    },
+  ],
+  // A fresh random image per run, so the smoke test cannot be passed by guessing
+  // the two most likely demo colours. Same palette as eve's own render-stripes
+  // fixture: single-token names no model paraphrases (unlike cyan/teal).
+  "view-image-smoke": [
+    {
+      label: "a randomized known.png for the view-image smoke test",
+      command:
+        "node -e \"const {PNG}=require('pngjs');const fs=require('fs');" +
+        "const P={black:[0,0,0],blue:[0,0,255],green:[0,160,0],orange:[255,140,0],red:[255,0,0],yellow:[255,220,0]};" +
+        "const n=Object.keys(P);const a=n[Math.floor(Math.random()*n.length)];" +
+        "let b=a;while(b===a){b=n[Math.floor(Math.random()*n.length)];}" +
+        "const s=64;const p=new PNG({width:s,height:s});" +
+        "for(let y=0;y<s;y++){for(let x=0;x<s;x++){const c=P[x<s/2?a:b];const i=(y*s+x)*4;" +
+        "p.data[i]=c[0];p.data[i+1]=c[1];p.data[i+2]=c[2];p.data[i+3]=255;}}" +
+        "fs.writeFileSync('known.png',PNG.sync.write(p));\"",
+    },
+  ],
+};
 
 export default defineSandbox({
   backend: evalSandboxBackend(),
-  // Both halves matter. The tarballs key covers the vgpu under test; the
-  // workspace key covers the seed files eve copies into /workspace. Without the
-  // second, changing the starter project (adding a file, or removing one, as
-  // the move to a bare package.json did) reuses a cached template still holding
-  // the OLD workspace — the agent would then be graded on a task it was not
-  // given, and nothing about the run would look wrong.
-  revalidationKey: () => `${tarballsFingerprint()}-${workspaceSeedKey()}`,
+  // All three parts matter. The tarballs key covers the vgpu under test; the
+  // task id and its seed hash cover WHICH starter project and WHAT is in it.
+  // Without the seed half, changing a starter project reuses a cached template
+  // still holding the old one — the agent is then graded on a task it was not
+  // given, and nothing about the run looks wrong. Without the task id, two
+  // tasks with different seeds would fight over one cache entry, and warming
+  // n1's expensive template would invalidate s2's.
+  revalidationKey: () => `${tarballsFingerprint()}-${requireTaskId()}-${taskSeedFingerprint()}`,
 
   /**
    * Runs once per sandbox TEMPLATE. It installs the branch's vgpu and proves
@@ -213,9 +296,23 @@ export default defineSandbox({
    * incompetent. With it, the run stops with an infra error, once, cached.
    */
   async bootstrap({ use }) {
+    // Before any time is spent: which task is this? An unset VGPU_EVALS_TASK is
+    // a usage error, and finding out after a two-minute install is worse.
+    const taskId = requireTaskId();
     const sandbox = await use();
     const manifest = readManifest();
     const dir = tarballsDir();
+
+    // Seed BEFORE installing, not after.
+    //
+    // `npm install` prunes packages the package.json on disk does not declare.
+    // Seeding after the tarball install would drop the task's package.json over
+    // the one npm just wrote, and the next install would delete the branch's
+    // vgpu as extraneous — the suite would then grade an agent that has no vgpu
+    // at all. Seeding first means one install resolves the tarballs AND whatever
+    // the task itself declares.
+    const seeded = await seedTaskWorkspace(sandbox, taskId);
+    process.stdout.write(`agent-evals: seeded ${seeded} file(s) for task ${taskId}\n`);
 
     await sandbox.run({ command: `mkdir -p ${TARBALL_DIR_IN_SANDBOX}` });
     for (const tarball of manifest.tarballs) {
@@ -242,6 +339,15 @@ export default defineSandbox({
       );
     }
 
+    // A second, argument-less install. The command above already completes the
+    // tree from package.json, so this is a cheap reconcile — but it is what
+    // keeps extra dependencies DATA-DRIVEN: a task declares `next`/`react` in
+    // its own seed package.json and no per-task package list ever appears here.
+    await sandbox.run({
+      command: "npm install --no-audit --no-fund --loglevel=error",
+      workingDirectory: WORKSPACE,
+    });
+
     let doctor = await runDoctor(sandbox);
     for (const remedy of REMEDIES) {
       if (doctor.verdict === "healthy") break;
@@ -261,6 +367,19 @@ export default defineSandbox({
           `after applying its prescriptions. This is an INFRA failure, not a model failure — ` +
           `do not read the transcript as an agent result.\n${doctor.raw}`,
       );
+    }
+
+    // Per-task extras last: they are only worth their minutes once the sandbox
+    // is known to render at all.
+    for (const extra of TASK_EXTRAS[taskId] ?? []) {
+      // `|| true` for the same reason as the remedies above — a pre-warm that
+      // cannot apply must not abort the template, which eve would then retry
+      // four times over.
+      const result = await sandbox.run({
+        command: `${extra.command} || true`,
+        workingDirectory: WORKSPACE,
+      });
+      process.stdout.write(`agent-evals: pre-warmed ${extra.label} (exit ${result.exitCode})\n`);
     }
   },
 });
