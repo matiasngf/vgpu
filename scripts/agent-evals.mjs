@@ -223,7 +223,10 @@ try {
   process.exit(1);
 }
 
-const child = spawn("pnpm", ["--filter", "@vgpu/agent-evals", "exec", "eve", "eval", evalFile, ...forwarded], {
+// `eve eval` identifies evals by ID (the `evals/<id>.eval.ts` filename minus
+// its extension, confirmed via `eve eval --list`), not by file path — passing
+// `evalFile` here made every invocation report "No evals found matching".
+const child = spawn("pnpm", ["--filter", "@vgpu/agent-evals", "exec", "eve", "eval", taskId, ...forwarded], {
   cwd: REPO_ROOT,
   stdio: "inherit",
 });

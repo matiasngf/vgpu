@@ -3,7 +3,7 @@ import { defineHook } from "eve/hooks";
 import type { SandboxSession } from "eve/sandbox";
 import { snapshotDir, snapshotTarPath } from "../lib/paths.ts";
 import { requireTaskId } from "../lib/task.ts";
-import { verifyN1HeroShader } from "./verify/n1-hero-shader.mjs";
+import { verifyN1HeroShader } from "../lib/verify/n1-hero-shader.mjs";
 
 const WORKSPACE = "/workspace";
 const TAR_IN_SANDBOX = "/tmp/vgpu-agent-evals-workspace.tar";
