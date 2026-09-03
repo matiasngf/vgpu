@@ -56,7 +56,7 @@ interface PingPongStorage { readonly read: import("vgpu").StorageBuffer; readonl
 | opts.size | `readonly [number, number]` | ✔ | — | Initial offscreen texture size in physical pixels. |
 | opts.format | `GPUTextureFormat` | ✖ | `"rgba8unorm"` | Used for single-color targets when `colors` is omitted. |
 | opts.colors | `readonly { format: GPUTextureFormat }[]` | ✖ | `[{ format: opts.format ?? "rgba8unorm" }]` | MRT color attachments. `target.color` is `colors[0]`. |
-| opts.depth | `boolean \| GPUTextureFormat` | ✖ | `undefined` | `true` means `"depth24plus"`; a string uses that depth format; omitted means no depth. |
+| opts.depth | `boolean \| GPUTextureFormat` | ✖ | `undefined` | `true` means `"depth24plus"`; a string uses that depth format; omitted means no depth. The depth texture is created with `texture_binding` usage, so `target.depth` can be sampled by later passes. |
 | opts.msaa | `boolean \| 4` | ✖ | `false` / sample count `1` | Only `true` or `4` enables MSAA, creating color/depth attachments with sample count `4` and resolving to sampleable `.color(s)`. |
 | opts.label | `string` | ✖ | `undefined` | Prefix for created texture labels. |
 | target.resize.size | `readonly [number, number]` | ✔ | — | Recreates offscreen textures unless size is unchanged. |
@@ -71,9 +71,25 @@ interface PingPongStorage { readonly read: import("vgpu").StorageBuffer; readonl
 
 **Returns:** `gpu.target()` returns `Target`; `resize()` returns `void`; `read()` returns `Promise<Uint8Array>`; `renderPassDescriptor(clear?, preserve?)` returns a WebGPU render pass descriptor; `gpu.pingPong()` returns `PingPongTargets`; `gpu.pingPongStorage()` returns `PingPongStorage`.
 
-**Throws:** `VGPU-TARGET-SIZE-REQUIRED` when runtime JS calls `gpu.target()` without `size`; `VGPU-TARGET-MSAA-INVALID` when runtime JS passes an unsupported `msaa` value (only `true` / `4` are accepted); `VGPU-RING1-UNSUPPORTED` when `msaa: true` / `4` with `rgba16float` is used on a Dawn compatibility-mode device; underlying core texture/readback operations can throw native WebGPU validation errors.
+**Throws:** `VGPU-TARGET-SIZE-REQUIRED` when runtime JS calls `gpu.target()` without `size`; `VGPU-R1-BINDING-INCOMPATIBLE-RESOURCE` when a `texture_depth_*` binding receives a target created without `depth`; `VGPU-TARGET-MSAA-INVALID` when runtime JS passes an unsupported `msaa` value (only `true` / `4` are accepted); `VGPU-RING1-UNSUPPORTED` when `msaa: true` / `4` with `rgba16float` is used on a Dawn compatibility-mode device; underlying core texture/readback operations can throw native WebGPU validation errors.
 
 ## Examples
+
+```ts
+import { init } from "vgpu/mock";
+
+const gpu = await init();
+// Depth written by the geometry pass is read back by a fullscreen pass (fog, SSAO, cloud occlusion, ...).
+const scene = gpu.target({ size: [256, 256], format: "rgba16float", depth: true });
+const fog = gpu.effect(`
+  @group(0) @binding(0) var sceneDepth: texture_depth_2d;
+  @group(0) @binding(1) var depthSampler: sampler;
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    let depth = textureSample(sceneDepth, depthSampler, uv); // browsers (core mode); see "Sampling depth" for compatibility mode
+    return vec4f(vec3f(depth), 1.0);
+  }
+`, { set: { sceneDepth: scene, depthSampler: gpu.sampler({ minFilter: "nearest", magFilter: "nearest" }) } });
+```
 
 ```ts
 import { init } from "vgpu/mock";
@@ -130,6 +146,10 @@ gpu.frame((frame) => {
 });
 pingPong.swap();
 ```
+
+## Sampling depth
+
+`target.depth` is a `Texture` with `render_attachment` and `texture_binding` usage. Bind it, or the `Target` itself, to a `texture_depth_2d` binding. This only works for non-`msaa` targets: MSAA passes discard their sample-count-4 depth at the end of the pass, so its contents are undefined afterwards. Depth textures are not filterable: read them with `textureLoad`, sample them with `textureSample` and a `gpu.sampler({ minFilter: "nearest", magFilter: "nearest" })` (vgpu declares that sampler slot as `non-filtering` automatically), or compare them with a `sampler_comparison` from `gpu.sampler({ compare: "less" })` and `textureSampleCompare`. WebGPU compatibility mode, which `vgpu/node` uses on Linux, only allows the comparison form on depth textures; code that must also run headless should use `textureSampleCompare` or write linear depth into a color attachment. Formats with a stencil aspect (`depth24plus-stencil8`, `depth32float-stencil8`) are bound through a depth-only view automatically. Binding a `Target` created without `depth` to a depth binding throws `VGPU-R1-BINDING-INCOMPATIBLE-RESOURCE` with a fix-it.
 
 ## Notes
 

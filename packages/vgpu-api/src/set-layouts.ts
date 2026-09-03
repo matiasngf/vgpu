@@ -3,23 +3,35 @@ import type { BindingInfo, EntryPointInfo, ReflectedBindingLayout, Reflection } 
 import { unsupportedError } from "./errors.ts";
 
 /** Builds explicit WebGPU BGL entries from the frozen ReflectionFacade bindingLayout metadata. */
-export type BindingVisibilityFn = ((binding: BindingInfo) => GPUShaderStageFlags) & { readonly filterable?: ReadonlySet<string> };
+export type BindingVisibilityFn = ((binding: BindingInfo) => GPUShaderStageFlags) & {
+  readonly filterable?: ReadonlySet<string>;
+  /** Samplers paired with depth textures: WebGPU only allows non-filtering (or comparison) samplers there. */
+  readonly nonFilteringSamplers?: ReadonlySet<string>;
+};
 
 const bindGroupLayoutCaches = new WeakMap<GPUDevice, Map<string, GPUBindGroupLayout>>();
 
 export function visibilityForEntries(bindings: readonly BindingInfo[], entries: readonly EntryPointInfo[]): BindingVisibilityFn {
   const masks = new Map<string, number>();
   const filterable = new Set<string>();
+  const nonFilteringSamplers = new Set<string>();
+  const depthTextures = new Set(bindings.filter((binding) => binding.bindingLayout?.kind === "texture" && binding.bindingLayout.texture.sampleType === "depth").map((binding) => `${binding.group}:${binding.binding}`));
   for (const entry of entries) {
     const stage = entry.stage === "vertex" ? 1 : entry.stage === "fragment" ? 2 : 4;
     for (const binding of entry.bindings ?? bindings) {
       const key = `${binding.group}:${binding.binding}`;
       masks.set(key, (masks.get(key) ?? 0) | stage);
     }
-    for (const pair of entry.samplingPairs ?? []) if (pair.mode === "filtering") filterable.add(`${pair.texture.group}:${pair.texture.binding}`);
+    for (const pair of entry.samplingPairs ?? []) {
+      if (pair.mode !== "filtering") continue;
+      const textureKey = `${pair.texture.group}:${pair.texture.binding}`;
+      if (depthTextures.has(textureKey)) nonFilteringSamplers.add(`${pair.sampler.group}:${pair.sampler.binding}`);
+      else filterable.add(textureKey);
+    }
   }
   const policy: BindingVisibilityFn = (binding) => masks.get(`${binding.group}:${binding.binding}`) ?? 0;
   Object.defineProperty(policy, "filterable", { value: filterable });
+  Object.defineProperty(policy, "nonFilteringSamplers", { value: nonFilteringSamplers });
   return policy;
 }
 
@@ -31,7 +43,8 @@ export function bindGroupLayoutEntriesForGroup(
   return bindings.flatMap((binding) => {
     if (binding.group !== group) return [];
     const mask = visibility(binding);
-    return mask === 0 ? [] : [{ binding: binding.binding, visibility: mask, ...layoutEntry(binding, visibility.filterable?.has(`${binding.group}:${binding.binding}`) ?? false) }];
+    const key = `${binding.group}:${binding.binding}`;
+    return mask === 0 ? [] : [{ binding: binding.binding, visibility: mask, ...layoutEntry(binding, visibility.filterable?.has(key) ?? false, visibility.nonFilteringSamplers?.has(key) ?? false) }];
   });
 }
 
@@ -86,10 +99,11 @@ function requiredLayout(bindGroupLayouts: ReadonlyMap<number, GPUBindGroupLayout
   return layout;
 }
 
-function layoutEntry(binding: BindingInfo, filterable: boolean): Omit<GPUBindGroupLayoutEntry, "binding" | "visibility"> {
+function layoutEntry(binding: BindingInfo, filterable: boolean, nonFilteringSampler: boolean): Omit<GPUBindGroupLayoutEntry, "binding" | "visibility"> {
   const reflected = binding.bindingLayout;
   if (!reflected) throw unsupportedError("bindGroupLayout", `Binding '${binding.name}' does not have a reflected bindingLayout.`);
   if (filterable && reflected.kind === "texture" && reflected.texture.sampleType === "unfilterable-float" && !reflected.texture.multisampled) return { texture: { ...reflected.texture, sampleType: "float" } };
+  if (nonFilteringSampler && reflected.kind === "sampler" && reflected.sampler.type === "filtering") return { sampler: { type: "non-filtering" } };
   return reflectedToWebGPU(reflected);
 }
 
