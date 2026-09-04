@@ -11,9 +11,15 @@ import { noise3 } from "./thruster-common.wgsl";
 // The plume brightens DOWNSTREAM (fuel-rich exhaust meets air), so heat ramps
 // up with distance from the nozzle instead of decaying.
 //
+// Noise style (from further launch photos): the dominant texture is long,
+// translucent fibres stretched ~10:1 along the flow at several scales, not
+// cauliflower billows; the fringe fans outward like a herringbone; the exit
+// shows discrete parallel engine jets; and periodic shock diamonds sit on the
+// axis. Billow noise only shapes the soft underlying body.
+//
 // The plume is a cone volume (nozzle radius r0, linear spread). Every march
-// step does: 2 atlas fetches (3D noise), 2 atlas fetches (domain warp) and one
-// detail fetch — no runtime octave loops. Ray/cone intersection bounds the
+// step does: 6 atlas fetches (warp, body, fibres — 2 slices each) and two
+// detail fetches — no runtime octave loops. Ray/cone intersection bounds the
 // march to the volume, and the loop exits early once transmittance is spent.
 
 struct Params {
@@ -29,7 +35,7 @@ struct Params {
 @group(0) @binding(4) var detailSamp: sampler;
 
 const PI: f32 = 3.14159265359;
-const STEPS: i32 = 40;
+const STEPS: i32 = 48;
 
 // Camera (eye at origin looking down -Z).
 const FOV_TAN: f32 = 0.4452; // tan(24°)
@@ -40,7 +46,7 @@ const AXIS: vec3f = vec3f(0.3707, -0.9268, 0.0556); // normalized
 const R0: f32 = 0.30;        // exit radius
 const SPREAD: f32 = 0.095;   // radius growth per unit length
 const LENGTH: f32 = 8.0;
-const BOUND_SCALE: f32 = 1.35; // march bounds are wider than the nominal cone
+const BOUND_SCALE: f32 = 1.7;  // march bounds are wider than the nominal cone
 
 fn plumeFrame() -> mat3x3f {
   // Orthonormal basis (U, V, AXIS) for cylindrical coordinates.
@@ -147,47 +153,54 @@ fn ign(p: vec2f) -> f32 {
     // afterburning mixing region further down.
     let shock = 1.0 - smoothstep(0.0, 2.4, s);
     let burn = smoothstep(0.4, 3.2, s);
-    let heat = smoothstep(1.0, 3.8, s);
+    let heat = smoothstep(0.6, 3.2, s);
 
-    // Domain warp from the low-frequency channel, then two 3D lookups at
-    // different frequencies. Coordinates scroll along the axis so the
-    // turbulence flows downstream; the second lookup scrolls faster so the
-    // pattern evolves instead of sliding rigidly.
+    // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
+    // This only sets the low-frequency silhouette and opacity.
     let flow = vec3f(0.0, 0.0, -time * 1.3);
-    let local = vec3f(qx, qy, s * 0.7);
-    let warpN = noise3(atlas, atlasSamp, local * 0.4 + flow * 0.55 + vec3f(0.31, 0.77, 0.0));
+    let warpN = noise3(atlas, atlasSamp, vec3f(qx, qy, s * 0.7) * 0.4 + flow * 0.55 + vec3f(0.31, 0.77, 0.0));
     let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.5 + 1.0 * burn) * radius;
     let warped = vec3f((qx + warp.x) * 1.4, (qy + warp.y) * 1.4, s * 0.75);
     let n = noise3(atlas, atlasSamp, warped + flow);
-    let n2 = noise3(atlas, atlasSamp, warped * 3.1 + flow * 1.9 + vec3f(0.5, 0.2, 0.37));
 
-    // Fine grain: cylindrical mapping stretched along the flow gives streaks.
+    // Fibre field (the reference's dominant texture): ridged noise stretched
+    // ~10x along the flow. One volumetric lookup (atlas .b) so fibres have
+    // depth, plus a cylindrical 2D lookup (detail .g) for the fine hairs,
+    // sheared outward with radius so the fringe fans out like a herringbone.
+    let fib3 = noise3(atlas, atlasSamp, vec3f((qx + warp.x * 0.5) * 1.7, (qy + warp.y * 0.5) * 1.7, s * 0.1) + flow * 0.45 + vec3f(0.5, 0.2, 0.37)).b;
     let theta = atan2(qy, qx) / (2.0 * PI);
-    let detScaleS = mix(0.3, 0.12, shock);
-    let det = textureSampleLevel(detail, detailSamp, vec2f(theta * 3.0 + warp.x * 0.4, s * detScaleS - time * 1.1), 0.0);
-    let streak = smoothstep(0.3, 0.8, det.r);
+    let fibreUv = vec2f(theta * 5.0 + warp.x * 0.35, (s - rad * radius * 0.6) * 0.085 - time * 0.75);
+    let fib2 = textureSampleLevel(detail, detailSamp, fibreUv, 0.0);
+    let fib2b = textureSampleLevel(detail, detailSamp, fibreUv * vec2f(2.7, 2.1) + vec2f(0.37, 0.11), 0.0);
+    let filament = clamp(fib3 * 0.45 + fib2.g * 0.35 + fib2b.g * 0.3, 0.0, 1.0);
+    // Thin, high-contrast hairs: only the ridge tops light up.
+    let hairs = smoothstep(0.45, 0.95, filament);
 
-    let turb = (n.r - 0.5) * 2.0 + (n2.r - 0.5) * 1.0 + (n.b - 0.5) * 0.6 * smoothstep(0.5, 1.1, rad);
-    let erosion = mix(0.25, 0.9, burn);
-    let shell = 1.0 - rad + turb * erosion + (det.r - 0.5) * (0.1 + 0.4 * burn);
+    // Shock diamonds: repeating bright nodes on the axis that fade downstream.
+    let phase = fract(s / 1.1 + 0.3);
+    let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + rad * 0.9) * (1.0 - smoothstep(1.5, 6.5, s));
+
+    let turb = (n.r - 0.5) * 2.0;
+    let erosion = mix(0.2, 0.7, burn);
+    // Fibres both erode the shell and poke past it, which makes the edge hairy.
+    let shell = 1.0 - rad + turb * erosion + (filament - 0.45) * (0.25 + 0.6 * burn) + (fib2.r - 0.5) * 0.12;
     var density = smoothstep(0.0, 0.1, shell);
-    density *= 0.35 + 1.0 * n.g * (0.6 + 0.8 * n2.g);
+    density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
     density *= smoothstep(0.0, 0.2, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH, s));
 
-    // Energy: heat builds up in the afterburn region, hotter toward the core,
-    // and the lumps carry the heat so the structure shows in the color too.
+    // Energy: heat builds up downstream, hotter toward the core, and the
+    // fibres and diamonds carry the highlights so the structure reads in color.
     let core = 1.0 - rad * rad * 0.45;
-    var energy = burn * core * (0.55 + 0.6 * n.g) * (0.8 + 0.4 * n2.g) * (0.9 + 0.2 * det.r);
-    energy *= 0.7 + 0.55 * heat;
+    var energy = burn * core * (0.55 + 0.4 * n.g) * (0.5 + 1.0 * hairs) * (0.9 + 0.2 * fib2.r);
+    energy *= 0.72 + 0.6 * heat;
     energy *= 1.0 - 0.2 * smoothstep(5.0, LENGTH, s);
+    energy += diamond * 0.8;
 
-    // Shock region: faint silver-blue gas with longitudinal streaks and a
-    // couple of soft diamond bands on the axis.
-    let bands = pow(max(0.0, sin(s * 5.5 + 0.7)), 5.0) * smoothstep(0.55, 0.05, rad) * 0.6;
-    let hazeColor = (vec3f(0.26, 0.38, 0.52) * (0.55 + 0.5 * streak) + vec3f(1.2, 1.1, 1.0) * bands) * shock;
-    // Crisp cylinder silhouette: barely any erosion, so the limb brightens
-    // where the ray path through the gas is longest.
-    let hazeDensity = smoothstep(0.0, 0.08, 1.0 - rad + (det.r - 0.5) * 0.08 + (n.r - 0.5) * 0.06) * (0.5 + 0.5 * streak) * 0.65 * shock;
+    // Exit region: discrete engine jets read as sharp parallel streaks in a
+    // faint silver-blue gas, with the first diamonds glowing warm white.
+    let jets = smoothstep(0.5, 0.9, fib2.g * 0.6 + fib3 * 0.5);
+    let hazeColor = (vec3f(0.26, 0.38, 0.52) * (0.3 + 1.0 * jets) + vec3f(1.4, 1.2, 1.0) * diamond) * shock;
+    let hazeDensity = smoothstep(0.0, 0.08, 1.0 - rad + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.7 * shock;
 
     let sigma = density * (0.4 + 4.5 * burn) + hazeDensity * 0.9;
     let alpha = 1.0 - exp(-sigma * dt);
