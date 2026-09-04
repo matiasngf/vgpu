@@ -27,9 +27,35 @@ struct Params {
   resolution: vec2f,
   time: f32,
   motion: f32,
+  sceneScale: vec2f, // scene texels per fire texel
+}
+
+// Camera: rays are unprojected from NDC with the inverse view-projection.
+struct Camera {
+  invViewProj: mat4x4f,
+  position: vec3f,
+}
+
+// Plume placement in world space (nozzle exit point, unit axis, exit radius,
+// radius growth per unit length, marched length).
+struct Plume {
+  nozzle: vec3f,
+  r0: f32,
+  axis: vec3f,
+  spread: f32,
+  length: f32,
+  // Light gains (scene-linear): soot blackbody, hydrogen glow, exit jets.
+  sootGain: f32,
+  glowGain: f32,
+  exitGain: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(5) var<uniform> camera: Camera;
+@group(0) @binding(6) var<uniform> plume: Plume;
+// Lit geometry (scene-linear radiance) and its camera distance, from scene.wgsl.
+@group(0) @binding(7) var sceneColor: texture_2d<f32>;
+@group(0) @binding(8) var sceneDepth: texture_2d<f32>;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var detail: texture_2d<f32>;
 @group(0) @binding(3) var atlasSamp: sampler;
@@ -37,23 +63,20 @@ struct Params {
 
 const PI: f32 = 3.14159265359;
 const STEPS: i32 = 64;
-
-// Camera (eye at origin looking down -Z).
-const FOV_TAN: f32 = 0.4452; // tan(24°)
-
-// Plume geometry in world units.
-const NOZZLE: vec3f = vec3f(-1.05, 1.5, -3.9);
-const AXIS: vec3f = vec3f(0.3707, -0.9268, 0.0556); // normalized
-const R0: f32 = 0.30;        // exit radius
-const SPREAD: f32 = 0.072;   // radius growth per unit length
-const LENGTH: f32 = 8.0;
 const BOUND_SCALE: f32 = 1.7;  // march bounds are wider than the nominal cone
 
 fn plumeFrame() -> mat3x3f {
-  // Orthonormal basis (U, V, AXIS) for cylindrical coordinates.
-  let u = normalize(cross(AXIS, vec3f(0.0, 0.0, 1.0)));
-  let v = cross(AXIS, u);
-  return mat3x3f(u, v, AXIS);
+  // Orthonormal basis (U, V, axis) for cylindrical coordinates.
+  let helper = select(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), abs(plume.axis.z) > 0.9);
+  let u = normalize(cross(plume.axis, helper));
+  let v = cross(plume.axis, u);
+  return mat3x3f(u, v, plume.axis);
+}
+
+fn cameraRay(ndc: vec2f) -> vec3f {
+  let nearPoint = camera.invViewProj * vec4f(ndc, 0.0, 1.0);
+  let farPoint = camera.invViewProj * vec4f(ndc, 1.0, 1.0);
+  return normalize(farPoint.xyz / farPoint.w - nearPoint.xyz / nearPoint.w);
 }
 
 fn sky(dir: vec3f) -> vec3f {
@@ -80,9 +103,6 @@ fn sky(dir: vec3f) -> vec3f {
 const GAS_GLOW: vec3f = vec3f(1.0, 0.27, 0.28);
 const EXIT_GLOW: vec3f = vec3f(0.42, 0.52, 1.0);
 const DIAMOND_GLOW: vec3f = vec3f(1.0, 0.92, 1.0);
-const SOOT_GAIN: f32 = 2.0;
-const GLOW_GAIN: f32 = 10.0;
-const EXIT_GAIN: f32 = 1.6;
 
 // Planckian-locus chromaticity (Kang et al. 2002 fit, valid 1667-4000 K)
 // converted to linear sRGB with Y = 1, scaled by a T^4 luminance term.
@@ -107,8 +127,11 @@ fn blackbody(temperature: f32) -> vec3f {
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
 fn coneInterval(o: vec3f, d: vec3f) -> vec2f {
-  let k = SPREAD * BOUND_SCALE;
-  let r0 = R0 * BOUND_SCALE;
+  let AXIS = plume.axis;
+  let NOZZLE = plume.nozzle;
+  let LENGTH = plume.length;
+  let k = plume.spread * BOUND_SCALE;
+  let r0 = plume.r0 * BOUND_SCALE;
   let apex = NOZZLE - AXIS * (r0 / k);
   let cos2 = 1.0 / (1.0 + k * k);
   let w = o - apex;
@@ -148,21 +171,31 @@ fn ign(p: vec2f) -> f32 {
 
 @fragment fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
   let res = params.resolution;
-  let ndc = (position.xy / res) * 2.0 - 1.0;
-  let aspect = res.x / res.y;
-  let dir = normalize(vec3f(ndc.x * aspect * FOV_TAN, -ndc.y * FOV_TAN, -1.0));
-  let origin = vec3f(0.0);
+  let ndc = vec2f((position.x / res.x) * 2.0 - 1.0, 1.0 - (position.y / res.y) * 2.0);
+  let dir = cameraRay(ndc);
+  let origin = camera.position;
+  let AXIS = plume.axis;
+  let NOZZLE = plume.nozzle;
+  let LENGTH = plume.length;
   let time = params.time * params.motion;
 
-  let background = sky(dir);
-  let interval = coneInterval(origin, dir);
+  // Geometry behind this pixel: distance from the camera, 0 where nothing
+  // was drawn (the scene target is cleared to 0). The march never continues
+  // behind a surface, and the surface shows through the remaining
+  // transmittance instead of the sky.
+  let scenePixel = vec2i(position.xy * params.sceneScale);
+  let surfaceDistance = textureLoad(sceneDepth, scenePixel, 0).r;
+  let hasSurface = surfaceDistance > 0.0;
+  let background = select(sky(dir), textureLoad(sceneColor, scenePixel, 0).rgb, hasSurface);
+  var interval = coneInterval(origin, dir);
+  if (hasSurface) { interval.y = min(interval.y, surfaceDistance); }
   if (interval.y <= interval.x) {
     return vec4f(background, 1.0);
   }
 
   let frame = plumeFrame();
-  let dt = (interval.y - interval.x) / f32(STEPS);
-  var t = interval.x + dt * ign(position.xy);
+  let dtWorld = (interval.y - interval.x) / f32(STEPS);
+  var t = interval.x + dtWorld * ign(position.xy);
   var color = vec3f(0.0);
   var transmittance = 1.0;
   var haze = 0.0; // accumulated near-nozzle gas, used for a heat-shimmer tint
@@ -170,12 +203,18 @@ fn ign(p: vec2f) -> f32 {
   for (var i = 0; i < STEPS; i++) {
     let p = origin + dir * t;
     let rel = p - NOZZLE;
-    let s = dot(rel, AXIS);
-    let q = rel - AXIS * s;
-    let qx = dot(q, frame[0]);
-    let qy = dot(q, frame[1]);
-    let radius = R0 + SPREAD * s;
-    let rad = length(q) / radius;
+    let sWorld = dot(rel, AXIS);
+    let q = rel - AXIS * sWorld;
+    let radiusWorld = plume.r0 + plume.spread * sWorld;
+    let rad = length(q) / radiusWorld;
+    // Everything below is expressed in "plume units" (the look was tuned for
+    // an exit radius of 0.3), so the same shader fits any engine size.
+    let unit = 0.3 / plume.r0;
+    let s = sWorld * unit;
+    let qx = dot(q, frame[0]) * unit;
+    let qy = dot(q, frame[1]) * unit;
+    let radius = radiusWorld * unit;
+    let dt = dtWorld * unit;
 
     // Downstream regimes: `shock` is the translucent exit region, `burn` the
     // afterburning mixing region further down.
@@ -220,14 +259,14 @@ fn ign(p: vec2f) -> f32 {
     let shell = 1.0 - rad + turb * erosion + (filament - 0.45) * (0.2 + 0.35 * burn) + (fib2.r - 0.5) * 0.12;
     var density = smoothstep(0.0, 0.1, shell);
     density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-    density *= smoothstep(0.0, 0.15, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH, s));
+    density *= smoothstep(0.0, 0.15, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH * unit, s));
 
     // Soot: only the mixing zone is sooty; it is hotter in the core and along
     // the fibres. Absorbing and emitting.
     let core = 1.0 - rad * rad * 0.45;
     let sootFrac = smoothstep(0.2, 0.7, s) * (1.0 - smoothstep(1.1, 3.0, s)) * (0.55 + 0.45 * n.g);
     let sootT = 1450.0 + 850.0 * clamp(core * (0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
-    let sootRadiance = blackbody(sootT) * SOOT_GAIN;
+    let sootRadiance = blackbody(sootT) * plume.sootGain;
 
     // Gas glow: optically thin, so it adds along the ray instead of riding on
     // opacity. Fibres and the hot core carry most of it.
@@ -235,7 +274,7 @@ fn ign(p: vec2f) -> f32 {
     // Radiance climbs steeply toward the axis: the shell just clips red on the
     // sensor, the core saturates every channel.
     let axial = core * core * core;
-    let glow = GAS_GLOW * (density * heat * (0.22 + 2.0 * axial + 2.8 * ridge) * GLOW_GAIN)
+    let glow = GAS_GLOW * (density * heat * (0.22 + 2.0 * axial + 2.8 * ridge) * plume.glowGain)
       // The densest, hottest core also radiates thermally (warm white).
       + blackbody(2900.0) * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0);
 
@@ -243,7 +282,7 @@ fn ign(p: vec2f) -> f32 {
     // blue-violet gas, with the first diamonds glowing warm white.
     let jets = smoothstep(0.5, 0.9, fib2.g * 0.6 + fib3 * 0.5);
     let hazeDensity = smoothstep(0.0, 0.08, 1.0 - rad + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.7 * shock;
-    let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * EXIT_GAIN;
+    let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * plume.exitGain;
     let diamondGlow = DIAMOND_GLOW * diamond * density * burn * 2.5;
 
     // High absorption downstream keeps the visible layer thin, so fibres at
@@ -254,7 +293,7 @@ fn ign(p: vec2f) -> f32 {
     haze += transmittance * hazeDensity * dt;
     transmittance *= 1.0 - alpha;
     if (transmittance < 0.012) { break; }
-    t += dt;
+    t += dtWorld;
   }
 
   // The near-nozzle gas is mostly transparent: let a slightly cooled, brighter

@@ -1,4 +1,4 @@
-import type { Effect, Frame, Gpu, Surface, Target } from 'vgpu';
+import type { Draw, Effect, Frame, Gpu, Surface, Target } from 'vgpu';
 
 import bakeDetailWgsl from './bake-detail.wgsl';
 import bakeNoiseWgsl from './bake-noise.wgsl';
@@ -7,10 +7,14 @@ import brightPassWgsl from './bright-pass.wgsl';
 import compositeWgsl from './composite.wgsl';
 import debugPreviewWgsl from './debug-preview.wgsl';
 import fireWgsl from './fire.wgsl';
+import sceneWgsl from './scene.wgsl';
+import shadowWgsl from './shadow.wgsl';
+import { invert, lookAt, multiply, orthographic, pack, perspective, type Vec3 } from './cad';
+import { buildEngine, buildGround, buildStand, DEFAULT_ENGINE, engineToStand } from './engine';
 
 type Output = Surface | Target;
 
-export type ThrusterIntermediate = 'noise-atlas' | 'detail' | 'fire-hdr' | 'bloom';
+export type ThrusterIntermediate = 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'fire-hdr' | 'bloom';
 
 export interface ThrusterThumbOptions {
   time?: number;
@@ -21,6 +25,29 @@ export interface ThrusterThumbOptions {
     size: readonly [number, number],
   ) => void | Promise<void>;
 }
+
+// --- Scene layout (units: nozzle exit radius = 1) ------------------------------
+
+/** Height of the engine axis above the pad. */
+const AXIS_HEIGHT = 1.7;
+/** Exhaust direction: horizontal +X (nozzle exit at the origin). */
+const PLUME_AXIS: Vec3 = [1, 0, 0];
+const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.95, spread: 0.05, length: 45, sootGain: 0.45, glowGain: 10, exitGain: 5 };
+const CAMERA = { position: [-9.5, 11.5, 11] as Vec3, target: [-0.5, 1.6, -0.5] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
+/** Orthographic sun camera covering the stand and the near plume. */
+const SHADOW = { size: 2048, halfExtent: 22, center: [0, 1, 0] as Vec3, distance: 60 };
+const LIGHTING = {
+  sunDir: normalize3([-0.55, 0.62, -0.45]),
+  sunIntensity: 3.0,
+  sunColor: [1.0, 0.96, 0.9],
+  ambient: 0.42,
+  skyColor: [0.55, 0.68, 0.85],
+  groundColor: [0.42, 0.38, 0.33],
+  shadowBias: 0.0008,
+};
+/** Point lights along the plume: (distance along axis, intensity). */
+const PLUME_LIGHT_SAMPLES: readonly [number, number][] = [[1.5, 30], [4, 60], [8, 90], [13, 90], [20, 70], [28, 40]];
+const PLUME_LIGHT_COLOR = [1.0, 0.5, 0.45];
 
 interface Effects {
   bakeNoise: Effect;
@@ -36,12 +63,24 @@ interface Effects {
   repeatSampler: GPUSampler;
 }
 
+type Mesh = ReturnType<Gpu['mesh']>;
+
+interface Geometry {
+  meshes: Mesh[];
+  draws: Draw[];
+  shadowDraws: Draw[];
+}
+
 interface Targets {
   /** Tileable 3D noise packed as 64 slices of 128² (+1 texel periodic border). Baked once. */
   noiseAtlas: Target;
   /** Tileable 2D high-frequency detail. Baked once. */
   detail: Target;
-  /** Half-resolution HDR fire pass. */
+  /** Sun shadow map: light-space depth in r32float. */
+  shadow: Target;
+  /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), plus depth. */
+  scene: Target;
+  /** HDR fire pass, composited over the scene. */
   fire: Target;
   bloomA: Target;
   bloomB: Target;
@@ -61,11 +100,12 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
   const surface = gpu.surface(canvas, { dpr: [1, 1.5] });
   const effects = createEffects(gpu, 'thrusters-live');
   const targets = createTargets(gpu, surface.size, 'thrusters-live');
+  const geometry = createGeometry(gpu, effects, targets, 'thrusters-live');
   let disposed = false;
 
   setConstants(effects, targets);
-  setBindings(effects, targets);
-  await prewarm(effects, targets, surface);
+  setBindings(effects, geometry, targets);
+  await prewarm(effects, geometry, targets, surface);
   bakeNoise(gpu, effects, targets);
 
   let sawInitialResize = false;
@@ -76,14 +116,14 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
     }
     if (disposed) return;
     resizeTargets(targets, surface.size);
-    setBindings(effects, targets);
+    setBindings(effects, geometry, targets);
   });
 
   const handle = gpu.frame.loop((frame) => {
     // Only the clock changes per frame; every other binding is stable.
     effects.fire.set({ params: { time: gpu.time } });
     effects.composite.set({ composite: { time: gpu.time } });
-    renderChain(frame, effects, targets, surface);
+    renderChain(frame, effects, geometry, targets, surface);
   });
 
   return () => {
@@ -91,6 +131,7 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
     disposed = true;
     handle.stop();
     unsubscribeResize();
+    for (const mesh of geometry.meshes) mesh.destroy();
     surface.dispose();
     gpu.dispose();
   };
@@ -99,41 +140,48 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
 export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbOptions = {}): Promise<void> {
   const effects = createEffects(gpu, 'thrusters-thumb');
   const targets = createTargets(gpu, target.size, 'thrusters-thumb');
+  const geometry = createGeometry(gpu, effects, targets, 'thrusters-thumb');
   const time = opts.time ?? 6.2;
   setConstants(effects, targets);
-  setBindings(effects, targets);
-  await prewarm(effects, targets, target);
+  setBindings(effects, geometry, targets);
+  await prewarm(effects, geometry, targets, target);
   bakeNoise(gpu, effects, targets);
 
   effects.fire.set({ params: { time } });
   effects.composite.set({ composite: { time } });
-  gpu.frame((frame) => renderChain(frame, effects, targets, target));
+  gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
   await gpu.gpu.queue.onSubmittedWorkDone();
 
   if (opts.onIntermediateRendered) {
-    await dumpIntermediates(gpu, effects, targets, opts.onIntermediateRendered);
+    await dumpIntermediates(gpu, targets, opts.onIntermediateRendered);
   }
   await gpu.settled();
+  for (const mesh of geometry.meshes) mesh.destroy();
 }
 
 /**
  * Reads every internal target back for headless inspection. 8-bit targets are
- * read directly; HDR targets go through a tonemapping preview pass first
+ * read directly; HDR and depth targets go through a preview pass first
  * because readback only supports 8-bit formats.
  */
 async function dumpIntermediates(
   gpu: Gpu,
-  effects: Effects,
   targets: Targets,
   report: NonNullable<ThrusterThumbOptions['onIntermediateRendered']>,
 ): Promise<void> {
   await report('noise-atlas', await targets.noiseAtlas.read(), targets.noiseAtlas.size);
   await report('detail', await targets.detail.read(), targets.detail.size);
   const preview = gpu.effect(debugPreviewWgsl, { label: 'thrusters-debug-preview' });
-  preview.set({ samp: effects.clampSampler, preview: { exposure: 1, mode: 0 } });
-  for (const [kind, source] of [['fire-hdr', targets.fire], ['bloom', targets.bloomA]] as const) {
-    const previewTarget = gpu.target({ size: source.size, format: 'rgba8unorm', label: `thrusters-preview-${kind}` });
-    preview.set({ src: source });
+  const jobs = [
+    ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: 1, mode: 2 }],
+    ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
+    ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
+    ['fire-hdr', targets.fire.color, targets.fire.size, { exposure: 1, mode: 0 }],
+    ['bloom', targets.bloomA.color, targets.bloomA.size, { exposure: 1, mode: 0 }],
+  ] as const;
+  for (const [kind, source, size, params] of jobs) {
+    const previewTarget = gpu.target({ size, format: 'rgba8unorm', label: `thrusters-preview-${kind}` });
+    preview.set({ src: source, preview: params });
     await preview.compile(previewTarget);
     gpu.frame((frame) => frame.pass({ target: previewTarget, clear: CLEAR }, (pass) => pass.draw(preview)));
     await gpu.gpu.queue.onSubmittedWorkDone();
@@ -165,10 +213,47 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
   return {
     noiseAtlas: gpu.target({ size: [NOISE_ATLAS_SIZE, NOISE_ATLAS_SIZE], format: 'rgba8unorm', label: `${label}-noise-atlas` }),
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
+    shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
+    scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }], depth: true, label: `${label}-scene` }),
     fire: gpu.target({ size: fireSize(full), format: HDR_FORMAT, label: `${label}-fire` }),
     bloomA: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-a` }),
     bloomB: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-b` }),
   };
+}
+
+/** Builds the parametric engine, stand and pad and uploads them as three draws. */
+function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: string): Geometry {
+  const engineLength = DEFAULT_ENGINE.chamberTop + 0.46 + 1.9;
+  const parts = [
+    ['engine', engineToStand(buildEngine(DEFAULT_ENGINE), AXIS_HEIGHT)],
+    ['stand', buildStand(engineLength, AXIS_HEIGHT)],
+    ['ground', buildGround()],
+  ] as const;
+  const meshes: Mesh[] = [];
+  const draws: Draw[] = [];
+  const shadowDraws: Draw[] = [];
+  for (const [name, cad] of parts) {
+    const data = pack(cad);
+    const mesh = gpu.mesh({
+      label: `${label}-${name}`,
+      buffers: [
+        { data: data.positions, attributes: { position: 'float32x3' } },
+        { data: data.normals, attributes: { normal: 'float32x3' } },
+        { data: data.uvs, attributes: { uv: 'float32x2' } },
+        { data: data.materials, attributes: { material: 'float32' } },
+      ],
+      indices: data.indices,
+    });
+    meshes.push(mesh);
+    draws.push(gpu.draw({
+      shader: sceneWgsl,
+      mesh,
+      label: `${label}-${name}`,
+      set: { detail: targets.detail, detailSamp: effects.repeatSampler, shadowMap: targets.shadow },
+    }));
+    shadowDraws.push(gpu.draw({ shader: shadowWgsl, mesh, label: `${label}-${name}-shadow` }));
+  }
+  return { meshes, draws, shadowDraws };
 }
 
 function setConstants(effects: Effects, targets: Targets): void {
@@ -178,6 +263,7 @@ function setConstants(effects: Effects, targets: Targets): void {
     detail: targets.detail,
     atlasSamp: effects.clampSampler,
     detailSamp: effects.repeatSampler,
+    plume: { ...PLUME, axis: PLUME_AXIS },
   });
   effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
@@ -187,8 +273,30 @@ function setConstants(effects: Effects, targets: Targets): void {
   effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.6, grain: 0.015, time: 0 } });
 }
 
-function setBindings(effects: Effects, targets: Targets): void {
-  effects.fire.set({ params: { resolution: targets.fire.size } });
+function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {
+  const [width, height] = targets.scene.size;
+  const view = lookAt(CAMERA.position, CAMERA.target);
+  const projection = perspective((CAMERA.fovDeg * Math.PI) / 180, width / height, CAMERA.near, CAMERA.far);
+  const viewProj = multiply(projection, view);
+  const plumeLights = PLUME_LIGHT_SAMPLES.map(([s, intensity]) => ({
+    position: [PLUME.nozzle[0] + PLUME_AXIS[0] * s, PLUME.nozzle[1] + PLUME_AXIS[1] * s, PLUME.nozzle[2] + PLUME_AXIS[2] * s],
+    intensity,
+  }));
+  const sunViewProj = sunCamera();
+  for (const draw of geometry.draws) {
+    draw.set({
+      camera: { viewProj, position: CAMERA.position, time: 0 },
+      lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, sunViewProj },
+      plumeLights: { color: PLUME_LIGHT_COLOR, count: plumeLights.length, lights: plumeLights },
+    });
+  }
+  for (const draw of geometry.shadowDraws) draw.set({ light: { viewProj: sunViewProj } });
+  effects.fire.set({
+    params: { resolution: targets.fire.size, sceneScale: [width / targets.fire.size[0], height / targets.fire.size[1]] },
+    camera: { invViewProj: invert(viewProj), position: CAMERA.position },
+    sceneColor: targets.scene,
+    sceneDepth: targets.scene.colors[1],
+  });
   effects.brightPass.set({ src: targets.fire });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
@@ -197,9 +305,21 @@ function setBindings(effects: Effects, targets: Targets): void {
   effects.composite.set({ scene: targets.fire, bloom: targets.bloomA });
 }
 
-async function prewarm(effects: Effects, targets: Targets, output: Output): Promise<void> {
+function sunCamera() {
+  const eye: Vec3 = [
+    SHADOW.center[0] + LIGHTING.sunDir[0] * SHADOW.distance,
+    SHADOW.center[1] + LIGHTING.sunDir[1] * SHADOW.distance,
+    SHADOW.center[2] + LIGHTING.sunDir[2] * SHADOW.distance,
+  ];
+  const e = SHADOW.halfExtent;
+  return multiply(orthographic(-e, e, -e, e, 1, SHADOW.distance * 2 + e), lookAt(eye, SHADOW.center));
+}
+
+async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, output: Output): Promise<void> {
   await Promise.all([
     effects.bakeNoise.compile(targets.noiseAtlas), effects.bakeDetail.compile(targets.detail),
+    ...geometry.draws.map((draw) => draw.compile(targets.scene)),
+    ...geometry.shadowDraws.map((draw) => draw.compile(targets.shadow)),
     effects.fire.compile(targets.fire), effects.brightPass.compile(targets.bloomA),
     effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
     effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
@@ -207,7 +327,7 @@ async function prewarm(effects: Effects, targets: Targets, output: Output): Prom
   ]);
 }
 
-/** Bakes the noise textures. Called once; the fire pass only ever reads them. */
+/** Bakes the noise textures. Called once; the fire and scene passes only ever read them. */
 function bakeNoise(gpu: Gpu, effects: Effects, targets: Targets): void {
   gpu.frame((frame) => {
     frame.pass({ target: targets.noiseAtlas, clear: CLEAR }, (pass) => pass.draw(effects.bakeNoise));
@@ -215,7 +335,15 @@ function bakeNoise(gpu: Gpu, effects: Effects, targets: Targets): void {
   });
 }
 
-function renderChain(frame: Frame, effects: Effects, targets: Targets, output: Output): void {
+function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets: Targets, output: Output): void {
+  // Shadow map is static geometry but cheap; re-render it so the bundle stays simple.
+  frame.pass({ target: targets.shadow, clear: [1, 0, 0, 1] }, (pass) => {
+    for (const draw of geometry.shadowDraws) pass.draw(draw);
+  });
+  // Depth attachment cleared to 0 in colors[1] means "no surface" for the plume.
+  frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => {
+    for (const draw of geometry.draws) pass.draw(draw);
+  });
   frame.pass({ target: targets.fire, clear: CLEAR }, (pass) => pass.draw(effects.fire));
   frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
   frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH1));
@@ -227,6 +355,7 @@ function renderChain(frame: Frame, effects: Effects, targets: Targets, output: O
 
 function resizeTargets(targets: Targets, size: readonly [number, number]): void {
   const full = normalizeSize(size);
+  targets.scene.resize(full);
   targets.fire.resize(fireSize(full));
   targets.bloomA.resize(bloomSize(full));
   targets.bloomB.resize(bloomSize(full));
@@ -243,4 +372,9 @@ function fireSize(size: readonly [number, number]): [number, number] {
 function bloomSize(size: readonly [number, number]): [number, number] {
   const height = Math.max(1, Math.min(BLOOM_HEIGHT, size[1]));
   return [Math.max(1, Math.round(height * size[0] / size[1])), height];
+}
+
+function normalize3(v: Vec3): Vec3 {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
 }
