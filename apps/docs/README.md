@@ -25,7 +25,7 @@
 
 - `node scripts/render-example-intermediates.mjs --slug <slug> --size 960x540 --time 6.2 --out ../../artifacts/<slug>` renders one example's `renderThumb` with `vgpu/node` and writes `final.png` plus one PNG per target the example reports through `onIntermediateRendered(kind, pixels, size)`.
 - It needs a healthy `vgpu doctor`; a software Vulkan driver is enough (`apt-get install mesa-vulkan-drivers`, then export `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` pointing at `lvp_icd.json`). A 960×540 frame of `spaceship-thrusters` renders in about a second on lavapipe, so you can iterate on shader detail without a browser.
-- Readback only supports 8-bit formats, so examples preview HDR targets through a tonemapping pass first (`spaceship-thrusters/debug-preview.wgsl` is a reusable template). `spaceship-thrusters` reports `noise-atlas`, `detail`, `fire-hdr`, and `bloom`.
+- Readback only supports 8-bit formats, so examples preview HDR targets through a tonemapping pass first (`spaceship-thrusters/debug-preview.wgsl` is a reusable template). `spaceship-thrusters` reports `noise-atlas`, `detail`, `shadow-map`, `scene-color`, `scene-depth`, `fire-hdr`, and `bloom`.
 
 ### Gotchas and safeguards
 

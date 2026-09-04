@@ -74,6 +74,14 @@ struct Material {
   metallic: f32,
 }
 
+// Soot streak the exhaust leaves on the pad: darkens along +X from the nozzle.
+fn scorch(world: vec3f) -> f32 {
+  let along = smoothstep(1.5, 6.0, world.x) * (1.0 - smoothstep(24.0, 40.0, world.x));
+  let across = 1.0 - smoothstep(0.8, 2.6 + world.x * 0.06, abs(world.z));
+  let breakup = textureSampleLevel(detail, detailSamp, world.xz * vec2f(0.03, 0.09), 0.0).r;
+  return along * across * (0.55 + 0.6 * breakup);
+}
+
 fn materialFor(id: u32, world: vec3f) -> Material {
   switch (id) {
     case 0u: { return Material(vec3f(0.022, 0.021, 0.02), 0.55, 0.1); }      // matte black (nozzle, insulated lines)
@@ -85,13 +93,13 @@ fn materialFor(id: u32, world: vec3f) -> Material {
       let joints = 1.0 - 0.18 * (1.0 - smoothstep(0.0, 0.012, min(abs(fract(world.x / 8.0 + 0.5) - 0.5), abs(fract(world.z / 8.0 + 0.5) - 0.5))));
       let patches = textureSampleLevel(detail, detailSamp, world.xz * 0.012 + vec2f(0.3, 0.7), 0.0).r;
       let albedo = vec3f(0.33, 0.315, 0.285) * (0.72 + 0.3 * grain.r + 0.1 * fine + 0.25 * patches) * joints;
-      return Material(albedo, 0.9, 0.0);
+      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.75), 0.9, 0.0);
     }
     case 4u: {                                                                // gravel apron
       let grain = textureSampleLevel(detail, detailSamp, world.xz * 0.12, 0.0);
       let fine = textureSampleLevel(detail, detailSamp, world.xz * 1.1, 0.0).g;
       let albedo = vec3f(0.26, 0.235, 0.20) * (0.7 + 0.5 * grain.r + 0.3 * fine);
-      return Material(albedo, 0.95, 0.0);
+      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.6), 0.95, 0.0);
     }
     case 5u: { return Material(vec3f(0.16, 0.165, 0.16), 0.6, 0.3); }      // painted steel (stand)
     default: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0); }         // white decal
