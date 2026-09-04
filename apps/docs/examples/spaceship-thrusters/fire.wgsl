@@ -1,6 +1,6 @@
 import { noise3 } from "./thruster-common.wgsl";
 
-// Raymarched exhaust plume. Runs at half resolution into an HDR target.
+// Raymarched exhaust plume rendered as scene-linear radiance into an HDR target.
 //
 // Reference analysis (crops of a rocket-stage photo, sRGB 8-bit means):
 //   sky            (82, 135, 149)  teal, darker toward the top
@@ -18,8 +18,9 @@ import { noise3 } from "./thruster-common.wgsl";
 // axis. Billow noise only shapes the soft underlying body.
 //
 // The plume is a cone volume (nozzle radius r0, linear spread). Every march
-// step does: 6 atlas fetches (warp, body, fibres — 2 slices each) and two
-// detail fetches — no runtime octave loops. Ray/cone intersection bounds the
+// step does: 6 atlas fetches (warp, body, fibres — 2 slices each) and five
+// detail fetches — no runtime octave loops. Quality mode: full-resolution
+// pass and 64 steps; the optimization pass comes once the look is locked. Ray/cone intersection bounds the
 // march to the volume, and the loop exits early once transmittance is spent.
 
 struct Params {
@@ -35,7 +36,7 @@ struct Params {
 @group(0) @binding(4) var detailSamp: sampler;
 
 const PI: f32 = 3.14159265359;
-const STEPS: i32 = 48;
+const STEPS: i32 = 64;
 
 // Camera (eye at origin looking down -Z).
 const FOV_TAN: f32 = 0.4452; // tan(24°)
@@ -44,7 +45,7 @@ const FOV_TAN: f32 = 0.4452; // tan(24°)
 const NOZZLE: vec3f = vec3f(-1.05, 1.5, -3.9);
 const AXIS: vec3f = vec3f(0.3707, -0.9268, 0.0556); // normalized
 const R0: f32 = 0.30;        // exit radius
-const SPREAD: f32 = 0.095;   // radius growth per unit length
+const SPREAD: f32 = 0.072;   // radius growth per unit length
 const LENGTH: f32 = 8.0;
 const BOUND_SCALE: f32 = 1.7;  // march bounds are wider than the nominal cone
 
@@ -58,23 +59,50 @@ fn plumeFrame() -> mat3x3f {
 fn sky(dir: vec3f) -> vec3f {
   // Teal sky measured from the reference: darker toward the top.
   let t = smoothstep(-0.55, 0.45, -dir.y);
-  let top = vec3f(0.045, 0.135, 0.175);
-  let bottom = vec3f(0.092, 0.235, 0.290);
+  let top = vec3f(0.070, 0.205, 0.265);
+  let bottom = vec3f(0.140, 0.355, 0.440);
   return mix(top, bottom, t);
 }
 
-// Emission per unit opacity as a function of energy `e`.
-// Reference colors (sRGB → linear): orange body (0.60,0.16,0.08),
-// salmon core (0.94,0.66,0.61), highlights close to white with a pink cast.
-fn fireRamp(e: f32) -> vec3f {
-  let c0 = vec3f(0.42, 0.045, 0.008);   // deep red fringe
-  let c1 = vec3f(1.15, 0.28, 0.055);    // orange
-  let c2 = vec3f(1.75, 0.92, 0.62);     // salmon
-  let c3 = vec3f(2.9, 2.5, 2.4);        // pink-white core (HDR)
-  var c = mix(c0, c1, smoothstep(0.0, 0.3, e));
-  c = mix(c, c2, smoothstep(0.3, 0.7, e));
-  c = mix(c, c3, smoothstep(0.68, 1.15, e));
-  return c;
+// --- Light model -------------------------------------------------------------
+// Radiance is in scene-linear units where the sky sits around 0.1-0.3 and the
+// plume core reaches well above 1, so the camera response in composite.wgsl
+// clips it per channel the way a sensor does (R saturates first, then G, B).
+//
+// 1. Soot in the initial mixing zone radiates as a blackbody (1550-2800 K):
+//    deep red fringe, orange body, yellow-white where it is hottest.
+// 2. The exhaust gas itself glows through hydrogen Balmer / OH emission —
+//    optically thin, magenta-pink. It dominates the core (clipping to
+//    pink-white) and the thin fringe, which mixes additively with the teal
+//    sky into the lavender edge seen in the reference.
+// 3. Near the exit, fuel-rich gas emits blue-violet Swan bands along the
+//    engine jets, with warm-white shock diamonds on the axis.
+const GAS_GLOW: vec3f = vec3f(1.0, 0.27, 0.28);
+const EXIT_GLOW: vec3f = vec3f(0.42, 0.52, 1.0);
+const DIAMOND_GLOW: vec3f = vec3f(1.0, 0.92, 1.0);
+const SOOT_GAIN: f32 = 2.0;
+const GLOW_GAIN: f32 = 10.0;
+const EXIT_GAIN: f32 = 1.6;
+
+// Planckian-locus chromaticity (Kang et al. 2002 fit, valid 1667-4000 K)
+// converted to linear sRGB with Y = 1, scaled by a T^4 luminance term.
+fn blackbody(temperature: f32) -> vec3f {
+  let T = clamp(temperature, 1667.0, 4000.0);
+  let x = -0.2661239e9 / (T * T * T) - 0.2343589e6 / (T * T) + 0.8776956e3 / T + 0.179910;
+  let y = select(
+    -0.9549476 * x * x * x - 1.37418593 * x * x + 2.09137015 * x - 0.16748867,
+    -1.1063814 * x * x * x - 1.34811020 * x * x + 2.18555832 * x - 0.20219683,
+    T < 2222.0,
+  );
+  let X = x / y;
+  let Z = (1.0 - x - y) / y;
+  let rgb = vec3f(
+    3.2406 * X - 1.5372 - 0.4986 * Z,
+    -0.9689 * X + 1.8758 + 0.0415 * Z,
+    0.0557 * X - 0.2040 + 1.0570 * Z,
+  );
+  let luminance = pow(temperature / 2600.0, 4.0);
+  return max(rgb, vec3f(0.0)) * luminance;
 }
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
@@ -151,15 +179,17 @@ fn ign(p: vec2f) -> f32 {
 
     // Downstream regimes: `shock` is the translucent exit region, `burn` the
     // afterburning mixing region further down.
-    let shock = 1.0 - smoothstep(0.0, 2.4, s);
-    let burn = smoothstep(0.4, 3.2, s);
-    let heat = smoothstep(0.6, 3.2, s);
+    // Regime distances are in nozzle-exit diameters scaled to the framing:
+    // the visible plume spans ~3.4 units (~6 diameters).
+    let shock = 1.0 - smoothstep(0.0, 1.5, s);
+    let burn = smoothstep(0.25, 2.0, s);
+    let heat = smoothstep(0.9, 2.7, s);
 
     // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
     // This only sets the low-frequency silhouette and opacity.
     let flow = vec3f(0.0, 0.0, -time * 1.3);
     let warpN = noise3(atlas, atlasSamp, vec3f(qx, qy, s * 0.7) * 0.4 + flow * 0.55 + vec3f(0.31, 0.77, 0.0));
-    let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.5 + 1.0 * burn) * radius;
+    let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.4 + 0.6 * burn) * radius;
     let warped = vec3f((qx + warp.x) * 1.4, (qy + warp.y) * 1.4, s * 0.75);
     let n = noise3(atlas, atlasSamp, warped + flow);
 
@@ -169,43 +199,58 @@ fn ign(p: vec2f) -> f32 {
     // sheared outward with radius so the fringe fans out like a herringbone.
     let fib3 = noise3(atlas, atlasSamp, vec3f((qx + warp.x * 0.5) * 1.7, (qy + warp.y * 0.5) * 1.7, s * 0.1) + flow * 0.45 + vec3f(0.5, 0.2, 0.37)).b;
     let theta = atan2(qy, qx) / (2.0 * PI);
-    let fibreUv = vec2f(theta * 5.0 + warp.x * 0.35, (s - rad * radius * 0.6) * 0.085 - time * 0.75);
+    let fibreUv = vec2f(theta * 7.0 + warp.x * 0.35, (s - rad * radius * 0.6) * 0.085 - time * 0.75);
     let fib2 = textureSampleLevel(detail, detailSamp, fibreUv, 0.0);
     let fib2b = textureSampleLevel(detail, detailSamp, fibreUv * vec2f(2.7, 2.1) + vec2f(0.37, 0.11), 0.0);
-    let filament = clamp(fib3 * 0.45 + fib2.g * 0.35 + fib2b.g * 0.3, 0.0, 1.0);
+    let fib2c = textureSampleLevel(detail, detailSamp, fibreUv * vec2f(6.1, 4.3) + vec2f(0.71, 0.53), 0.0);
+    // Knots: a nearly isotropic lookup along the flow breaks the streaks into
+    // segments of varying brightness instead of uniform brush strokes.
+    let knots = textureSampleLevel(detail, detailSamp, vec2f(theta * 7.0 + 0.13, s * 0.55 - time * 0.75 + fib2.b * 0.2), 0.0).r;
+    let filament = clamp((fib3 * 0.42 + fib2.g * 0.32 + fib2b.g * 0.26 + fib2c.g * 0.16) * (0.65 + 0.7 * knots), 0.0, 1.0);
     // Thin, high-contrast hairs: only the ridge tops light up.
-    let hairs = smoothstep(0.45, 0.95, filament);
+    let hairs = smoothstep(0.55, 0.95, filament);
 
     // Shock diamonds: repeating bright nodes on the axis that fade downstream.
-    let phase = fract(s / 1.1 + 0.3);
-    let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + rad * 0.9) * (1.0 - smoothstep(1.5, 6.5, s));
+    let phase = fract(s / 0.7 + 0.3);
+    let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + rad * 0.9) * (1.0 - smoothstep(0.9, 4.0, s));
 
     let turb = (n.r - 0.5) * 2.0;
-    let erosion = mix(0.2, 0.7, burn);
+    let erosion = mix(0.2, 0.5, burn);
     // Fibres both erode the shell and poke past it, which makes the edge hairy.
-    let shell = 1.0 - rad + turb * erosion + (filament - 0.45) * (0.25 + 0.6 * burn) + (fib2.r - 0.5) * 0.12;
+    let shell = 1.0 - rad + turb * erosion + (filament - 0.45) * (0.2 + 0.35 * burn) + (fib2.r - 0.5) * 0.12;
     var density = smoothstep(0.0, 0.1, shell);
     density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-    density *= smoothstep(0.0, 0.2, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH, s));
+    density *= smoothstep(0.0, 0.15, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH, s));
 
-    // Energy: heat builds up downstream, hotter toward the core, and the
-    // fibres and diamonds carry the highlights so the structure reads in color.
+    // Soot: only the mixing zone is sooty; it is hotter in the core and along
+    // the fibres. Absorbing and emitting.
     let core = 1.0 - rad * rad * 0.45;
-    var energy = burn * core * (0.55 + 0.4 * n.g) * (0.5 + 1.0 * hairs) * (0.9 + 0.2 * fib2.r);
-    energy *= 0.72 + 0.6 * heat;
-    energy *= 1.0 - 0.2 * smoothstep(5.0, LENGTH, s);
-    energy += diamond * 0.8;
+    let sootFrac = smoothstep(0.2, 0.7, s) * (1.0 - smoothstep(1.1, 3.0, s)) * (0.55 + 0.45 * n.g);
+    let sootT = 1450.0 + 850.0 * clamp(core * (0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
+    let sootRadiance = blackbody(sootT) * SOOT_GAIN;
 
-    // Exit region: discrete engine jets read as sharp parallel streaks in a
-    // faint silver-blue gas, with the first diamonds glowing warm white.
+    // Gas glow: optically thin, so it adds along the ray instead of riding on
+    // opacity. Fibres and the hot core carry most of it.
+    let ridge = hairs * sqrt(hairs);
+    // Radiance climbs steeply toward the axis: the shell just clips red on the
+    // sensor, the core saturates every channel.
+    let axial = core * core * core;
+    let glow = GAS_GLOW * (density * heat * (0.22 + 2.0 * axial + 2.8 * ridge) * GLOW_GAIN)
+      // The densest, hottest core also radiates thermally (warm white).
+      + blackbody(2900.0) * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0);
+
+    // Exit region: discrete engine jets read as sharp parallel streaks of
+    // blue-violet gas, with the first diamonds glowing warm white.
     let jets = smoothstep(0.5, 0.9, fib2.g * 0.6 + fib3 * 0.5);
-    let hazeColor = (vec3f(0.26, 0.38, 0.52) * (0.3 + 1.0 * jets) + vec3f(1.4, 1.2, 1.0) * diamond) * shock;
     let hazeDensity = smoothstep(0.0, 0.08, 1.0 - rad + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.7 * shock;
+    let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * EXIT_GAIN;
+    let diamondGlow = DIAMOND_GLOW * diamond * density * burn * 2.5;
 
-    let sigma = density * (0.4 + 4.5 * burn) + hazeDensity * 0.9;
+    // High absorption downstream keeps the visible layer thin, so fibres at
+    // different depths do not average into mush.
+    let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + hazeDensity * 0.35;
     let alpha = 1.0 - exp(-sigma * dt);
-    let perOpacity = (fireRamp(energy) * density * (0.4 + 4.5 * burn) * burn + hazeColor * hazeDensity * 0.9) / max(sigma, 1e-4);
-    color += transmittance * perOpacity * alpha;
+    color += transmittance * (sootRadiance * sootFrac * alpha + (glow + exitGlow + diamondGlow) * dt);
     haze += transmittance * hazeDensity * dt;
     transmittance *= 1.0 - alpha;
     if (transmittance < 0.012) { break; }

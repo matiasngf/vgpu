@@ -51,7 +51,7 @@ interface Targets {
 const NOISE_ATLAS_SIZE = (128 + 2) * 8;
 const DETAIL_SIZE = 512;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
-const FIRE_SCALE = 0.5;
+const FIRE_SCALE = 1.0; // TODO: optimization pass once the look is locked
 const BLOOM_HEIGHT = 240;
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 
@@ -179,12 +179,12 @@ function setConstants(effects: Effects, targets: Targets): void {
     atlasSamp: effects.clampSampler,
     detailSamp: effects.repeatSampler,
   });
-  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 0.7, knee: 0.5 } });
+  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.05, bloomStrength: 0.8, grain: 0.015, time: 0 } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.6, grain: 0.015, time: 0 } });
 }
 
 function setBindings(effects: Effects, targets: Targets): void {

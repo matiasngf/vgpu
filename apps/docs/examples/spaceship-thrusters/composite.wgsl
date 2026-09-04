@@ -10,10 +10,6 @@ struct Composite {
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var<uniform> composite: Composite;
 
-fn aces(x: vec3f) -> vec3f {
-  return clamp((x * (2.51 * x + vec3f(0.03))) / (x * (2.43 * x + vec3f(0.59)) + vec3f(0.14)), vec3f(0.0), vec3f(1.0));
-}
-
 fn hash21(p: vec2f) -> f32 {
   var q = fract(p * vec2f(123.34, 456.21));
   q += vec2f(dot(q, q + vec2f(45.32)));
@@ -21,24 +17,21 @@ fn hash21(p: vec2f) -> f32 {
 }
 
 @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
-  // The fire pass rendered at half resolution; bilinear upsampling is enough
-  // because the plume has no hard edges.
-  let hdr = textureSampleLevel(scene, samp, uv, 0.0).rgb;
-  let glow = textureSampleLevel(bloom, samp, uv, 0.0).rgb;
-  var color = (hdr + glow * composite.bloomStrength) * composite.exposure;
+  // The fire pass is scene-linear radiance. Halation from the bloom chain is
+  // added with the red bias film shows, then the sensor response soft-clips
+  // each channel independently: an orange core saturates R first, then G,
+  // then B, which is what turns the hottest part of a flame white on camera.
+  let radiance = textureSampleLevel(scene, samp, uv, 0.0).rgb;
+  let halation = textureSampleLevel(bloom, samp, uv, 0.0).rgb * vec3f(1.0, 0.85, 0.78);
+  let exposed = (radiance + halation * composite.bloomStrength) * composite.exposure;
+  var color = vec3f(1.0) - exp(-exposed);
 
-  // Teal/orange grade measured from the reference: shadows lean cyan, the
-  // highlights keep a warm pink cast.
-  let luma = dot(color, vec3f(0.2126, 0.7152, 0.0722));
-  let shadowTint = vec3f(0.96, 1.02, 1.04);
-  let highlightTint = vec3f(1.04, 0.99, 0.97);
-  color *= mix(shadowTint, highlightTint, smoothstep(0.05, 0.9, luma));
-
-  color = aces(color);
+  // Gentle film-style contrast: lift mids slightly, keep the toe.
+  color = mix(color, color * color * (3.0 - 2.0 * color), 0.35);
 
   let centered = uv - vec2f(0.5);
   let vignette = 1.0 - smoothstep(0.5, 1.2, length(centered) * 1.55);
-  color *= mix(0.78, 1.0, vignette);
+  color *= mix(0.8, 1.0, vignette);
 
   color = pow(color, vec3f(1.0 / 2.2));
   color += (hash21(uv * 1024.0 + fract(composite.time) * 17.0) - 0.5) * composite.grain;
