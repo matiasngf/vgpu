@@ -9,6 +9,7 @@ export type { MeshAttributeOverride, MeshAttributes, MeshBuffer, MeshBufferOptio
 export type { Frame, FramePass, FramePassOptions, FrameLoopHandle, FrameLoopOptions, FrameRunner } from "./frame.ts";
 export type { Effect, EffectOptions } from "./effect.ts";
 export type { CompileTarget, Target, TargetOptions, TargetSignature, TargetTextureOptions } from "./target.ts";
+export type { TextureOptions, TextureUsageName } from "./texture.ts";
 export { VGPUError } from "./errors.ts";
 export type { Buffer, Device, ResourceIdentity, Texture, VGPUAdapter } from "@vgpu/core";
 export { Uniform } from "./core/uniform.ts";

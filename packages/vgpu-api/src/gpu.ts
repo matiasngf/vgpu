@@ -1,5 +1,5 @@
 import type { ShaderSource } from "@vgpu/wgsl";
-import type { RequiredDeviceLimits, VGPUAdapter } from "@vgpu/core";
+import type { RequiredDeviceLimits, Texture, VGPUAdapter } from "@vgpu/core";
 import { Device } from "@vgpu/core";
 import { createBindGroupCache } from "./bind-cache.ts";
 import { createBundle, type Bundle, type BundleOptions, type BundleRecorder } from "./bundle.ts";
@@ -11,6 +11,7 @@ import { mesh as createSceneMesh } from "./scene/mesh.ts";
 import { Mesh, type MeshOptions } from "./scene/mesh-descriptor.ts";
 import type { SceneGeometry } from "./scene/geometry.ts";
 import { OffscreenTarget, type Target, type TargetOptions, type TargetTextureOptions } from "./target.ts";
+import { createTexture, type TextureOptions } from "./texture.ts";
 import { frameReentrantError, surfaceDuplicateError, unsupportedError, VGPUError } from "./errors.ts";
 import { ComputePipeline } from "./compute.ts";
 import { createStorageBuffer } from "./storage.ts";
@@ -49,6 +50,7 @@ export interface Gpu {
   effect(source: string | ShaderSource, opts?: EffectOptions): Effect;
   draw(opts: DrawOptions): Draw;
   target(opts: TargetOptions): Target;
+  texture(opts: TextureOptions): Texture;
   readonly frame: FrameRunner & ((cb?: (frame: Frame) => void) => Frame);
   sampler(desc?: GPUSamplerDescriptor): GPUSampler;
   mesh(geometry: SceneGeometry): Mesh;
@@ -126,6 +128,7 @@ class RingGpu implements Gpu {
     return new InternalDraw(this.device, shader, { ...opts, shader }, this.#cache, undefined, this.#pipelineStore, this.#shaderModules, this.#pipelineLayouts, (error) => this.#reportError(error), (promise) => this.#trackDelivery(promise));
   }
   target(opts: TargetOptions): Target { return new OffscreenTarget(this.device, opts); }
+  texture(opts: TextureOptions): Texture { return createTexture(this.device, opts); }
   sampler(desc?: GPUSamplerDescriptor): GPUSampler { return this.#samplers.sampler(desc); }
   mesh(geometry: SceneGeometry): Mesh;
   mesh(options: MeshOptions): Mesh;

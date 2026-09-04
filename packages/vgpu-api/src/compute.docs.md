@@ -39,7 +39,7 @@ interface StorageBuffer {
 | gpu.compute.opts | `ComputeOptions` | ✖ | `{}` | Initial compute options. |
 | opts.label | `string` | ✖ | `"compute"` | Used in shader reflection, GPU labels, and error `where` fields. |
 | opts.set | `Record<string, unknown>` | ✖ | `undefined` | Initial `.set()` call. |
-| compute.set.values | `Record<string, unknown>` | ✔ | — | Binding values by WGSL variable name. JS values are packed; buffers/resources are bound by identity. |
+| compute.set.values | `Record<string, unknown>` | ✔ | — | Binding values by WGSL variable name. JS values are packed; buffers/resources are bound by identity. `texture_storage_*` bindings take a `Texture` from `gpu.texture()` whose `usage` includes `storage_binding`. |
 | compute.dispatch.x | `number` | ✔ | — | Workgroup count X passed to `dispatchWorkgroups`. |
 | compute.dispatch.y | `number` | ✖ | `1` | Workgroup count Y. |
 | compute.dispatch.z | `number` | ✖ | `1` | Workgroup count Z. |
@@ -49,7 +49,7 @@ interface StorageBuffer {
 
 **Returns:** `gpu.compute()` returns `Compute`; `set()` returns the same `Compute`; `dispatch()` returns `void` after submitting; `gpu.storage()` returns a main API (`vgpu`) `StorageBuffer`; `StorageBuffer.read()` resolves an `ArrayBuffer` copy.
 
-**Throws:** `VGPU-RING1-UNSUPPORTED` when the shader has no `@compute` entry point; `VGPU-R1-STORAGE-ALIASING` when the same storage buffer is bound more than once and at least one reflected binding is writable; `VGPU-R1-BINDING-NEVER-SET`, `VGPU-R1-OWNERSHIP-FLIP`, and `VGPU-R1-BINDING-INCOMPATIBLE-RESOURCE` for binding errors; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `TypeError` if `StorageBuffer.write()` receives a non-buffer source.
+**Throws:** `VGPU-RING1-UNSUPPORTED` when the shader has no `@compute` entry point; `VGPU-R1-STORAGE-ALIASING` when the same storage buffer is bound more than once and at least one reflected binding is writable; `VGPU-R1-BINDING-NEVER-SET`, `VGPU-R1-OWNERSHIP-FLIP`, and `VGPU-R1-BINDING-INCOMPATIBLE-RESOURCE` for binding errors (a storage texture binding rejects targets, textures without `storage_binding` usage, and format or dimension mismatches with the WGSL declaration); `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `TypeError` if `StorageBuffer.write()` receives a non-buffer source.
 
 ## Examples
 
@@ -91,10 +91,33 @@ step.dispatch(Math.ceil(256 / 64));
 particles.swap();
 ```
 
+```ts
+import { init } from "vgpu/mock";
+
+const gpu = await init();
+// Compute writes a storage texture; a fragment shader samples the same texture.
+const noise = gpu.texture({ size: [64, 64], format: "rgba8unorm", label: "noise" });
+const fill = gpu.compute(`
+  @group(0) @binding(0) var out: texture_storage_2d<rgba8unorm, write>;
+  @compute @workgroup_size(8, 8)
+  fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+    textureStore(out, id.xy, vec4f(f32(id.x) / 63.0, f32(id.y) / 63.0, 0.0, 1.0));
+  }
+`, { label: "fill", set: { out: noise } });
+fill.dispatch(8, 8);
+
+const show = gpu.effect(`
+  @group(0) @binding(0) var noise: texture_2d<f32>;
+  @group(0) @binding(1) var linear: sampler;
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f { return textureSample(noise, linear, uv); }
+`, { set: { noise, linear: gpu.sampler() } });
+```
+
 ## Notes
 
+- Storage textures come from `gpu.texture()`. `set()` checks the texture's usage, format, and dimension against the reflected `texture_storage_*` declaration and throws `VGPU-R1-BINDING-INCOMPATIBLE-RESOURCE` with a fix-it on mismatch; a `Target` is never accepted for a storage binding.
 - Use `gpu.pingPongStorage(bytes)` when a compute step reads previous state and writes next state; binding the same writable storage identity twice is rejected before dispatch.
 - Bindings use compute visibility only when statically reachable from the selected compute entry point; unused declarations stay in the layout with visibility `0`.
 - Dispatch counts are forwarded to WebGPU; validate domain-specific bounds in your app.
 - `gpu.storage()` creates storage buffers with `copy_src` and `copy_dst`, so they can be read back and rewritten from JS.
-- **See also:** `Gpu.compute`, `Draw.set`, `SharedUniforms`, `Target`, `StorageBuffer` from `vgpu/core`.
+- **See also:** `Gpu.compute`, `Gpu.texture`, `Draw.set`, `SharedUniforms`, `Target`, `StorageBuffer` from `vgpu/core`.
