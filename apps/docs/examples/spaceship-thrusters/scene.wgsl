@@ -191,7 +191,7 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     let toLight = p - in.world;
     let dist2 = max(dot(toLight, toLight), 0.25);
     let l = toLight * inverseSqrt(dist2);
-    let profile = 0.25 + smoothstep(0.0, 6.0, s) * (1.0 - smoothstep(18.0, 32.0, s));
+    let profile = 0.15 + smoothstep(0.0, 6.0, s) * (1.0 - smoothstep(18.0, 32.0, s));
     let tint = mix(vec3f(0.75, 0.8, 1.0), vec3f(1.0, 0.55, 0.42), smoothstep(1.0, 8.0, s));
     color += shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
   }

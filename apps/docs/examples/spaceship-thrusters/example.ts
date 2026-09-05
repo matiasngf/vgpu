@@ -32,7 +32,7 @@ export interface ThrusterThumbOptions {
 const AXIS_HEIGHT = 1.7;
 /** Exhaust direction: horizontal +X (nozzle exit at the origin). */
 const PLUME_AXIS: Vec3 = [1, 0, 0];
-const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.95, spread: 0.05, length: 45, sootGain: 0.45, glowGain: 10, exitGain: 5 };
+const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.35, glowGain: 10, exitGain: 5 };
 const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
 /** Orthographic sun camera covering the stand and the near plume. */
 const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
@@ -46,7 +46,7 @@ const LIGHTING = {
   shadowBias: 0.0008,
 };
 /** Segment light that stands in for the plume's glow on the geometry. */
-const PLUME_LIGHT = { length: 32, intensity: 110 };
+const PLUME_LIGHT = { length: 32, intensity: 14 };
 
 interface Effects {
   bakeNoise: Effect;
@@ -264,12 +264,12 @@ function setConstants(effects: Effects, targets: Targets): void {
     detailSamp: effects.repeatSampler,
     plume: { ...PLUME, axis: PLUME_AXIS },
   });
-  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
+  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 0.8, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.6, grain: 0.015, time: 0 } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.9, grain: 0.015, time: 0 } });
 }
 
 function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {

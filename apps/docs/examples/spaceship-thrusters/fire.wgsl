@@ -63,7 +63,7 @@ struct Plume {
 
 const PI: f32 = 3.14159265359;
 const STEPS: i32 = 64;
-const BOUND_SCALE: f32 = 1.7;  // march bounds are wider than the nominal cone
+const BOUND_SCALE: f32 = 1.5;  // march bounds are wider than the nominal cone
 
 fn plumeFrame() -> mat3x3f {
   // Orthonormal basis (U, V, axis) for cylindrical coordinates.
@@ -123,6 +123,18 @@ fn blackbody(temperature: f32) -> vec3f {
   );
   let luminance = pow(temperature / 2600.0, 4.0);
   return max(rgb, vec3f(0.0)) * luminance;
+}
+
+// Visible jet radius in exit radii as a function of distance in exit radii.
+// A sea-level nozzle runs slightly over-expanded: ambient pressure squeezes
+// the jet through oblique shocks so its boundary CONTRACTS to the first Mach
+// disk, recovers a little, and only then does afterburning of the fuel-rich
+// exhaust with entrained air flare the plume outward. Measured on a single
+// engine test: ~2R wide for ~2R, a neck of ~0.35 at ~4.5R, flare from ~6R.
+fn jetProfile(sR: f32) -> f32 {
+  let neck = mix(1.0, 0.38, smoothstep(1.5, 4.5, sR));
+  let recover = mix(neck, 0.72, smoothstep(4.5, 6.0, sR));
+  return mix(recover, 1.7, smoothstep(5.0, 14.0, sR));
 }
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
@@ -214,7 +226,8 @@ fn ign(p: vec2f) -> f32 {
     let rel = p - NOZZLE;
     let sWorld = dot(rel, AXIS);
     let q = rel - AXIS * sWorld;
-    let radiusWorld = plume.r0 + plume.spread * sWorld;
+    let sR = sWorld / plume.r0; // distance in exit radii
+    let radiusWorld = plume.r0 * jetProfile(sR) + plume.spread * max(sWorld - 10.0 * plume.r0, 0.0);
     let rad = length(q) / radiusWorld;
     // Everything below is expressed in "plume units" (the look was tuned for
     // an exit radius of 0.3), so the same shader fits any engine size.
@@ -227,17 +240,25 @@ fn ign(p: vec2f) -> f32 {
 
     // Downstream regimes: `shock` is the translucent exit region, `burn` the
     // afterburning mixing region further down.
-    // Regime distances are in nozzle-exit diameters scaled to the framing:
-    // the visible plume spans ~3.4 units (~6 diameters).
-    let shock = 1.0 - smoothstep(0.0, 1.5, s);
-    let burn = smoothstep(0.25, 2.0, s);
-    let heat = smoothstep(0.9, 2.7, s);
+    // Flow regimes along the jet, in exit radii (see jetProfile):
+    //   exitCore  — hot exhaust leaving the nozzle, bright white, full width
+    //   expanded  — the gas expands and cools on the way to the Mach disk:
+    //               dim, translucent, violet ("zone of silence")
+    //   machDisk  — the normal shock re-compresses and re-heats the flow
+    //   burn/heat — afterburning of CO/H2 with entrained air, the intense
+    //               pink-white fire that spreads outward
+    let exitCore = 1.0 - smoothstep(1.0, 2.3, sR);
+    let expanded = smoothstep(1.6, 3.0, sR) * (1.0 - smoothstep(4.2, 6.0, sR));
+    let machDisk = exp(-pow((sR - 4.5) / 0.35, 2.0)) * smoothstep(0.9, 0.3, rad);
+    let shock = 1.0 - smoothstep(0.0, 6.0, sR);
+    let burn = smoothstep(4.6, 6.6, sR);
+    let heat = smoothstep(5.2, 8.5, sR);
 
     // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
     // This only sets the low-frequency silhouette and opacity.
     let flow = vec3f(0.0, 0.0, -time * 1.3);
     let warpN = noise3(atlas, atlasSamp, vec3f(qx, qy, s * 0.7) * 0.4 + flow * 0.55 + vec3f(0.31, 0.77, 0.0));
-    let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.4 + 0.6 * burn) * radius;
+    let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.25 + 0.35 * burn) * radius;
     let warped = vec3f((qx + warp.x) * 1.4, (qy + warp.y) * 1.4, s * 0.75);
     let n = noise3(atlas, atlasSamp, warped + flow);
 
@@ -258,23 +279,29 @@ fn ign(p: vec2f) -> f32 {
     // Thin, high-contrast hairs: only the ridge tops light up.
     let hairs = smoothstep(0.55, 0.95, filament);
 
-    // Shock diamonds: repeating bright nodes on the axis that fade downstream.
-    let phase = fract(s / 0.7 + 0.3);
-    let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + rad * 0.9) * (1.0 - smoothstep(0.9, 4.0, s));
+    // Further shock diamonds repeat past the first Mach disk and fade as the
+    // shear layer mixes the jet with air.
+    let phase = fract((sR - 4.5) / 1.5);
+    let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + rad * 0.9) * smoothstep(4.2, 5.0, sR) * (1.0 - smoothstep(6.0, 14.0, sR));
 
     let turb = (n.r - 0.5) * 2.0;
-    let erosion = mix(0.2, 0.5, burn);
+    let erosion = mix(0.12, 0.3, burn);
+    // Attach cleanly to the lip: turbulence only starts a little past the exit.
+    let ramp = smoothstep(0.1, 0.8, s);
     // Fibres both erode the shell and poke past it, which makes the edge hairy.
-    let shell = 1.0 - rad + turb * erosion + (filament - 0.45) * (0.2 + 0.35 * burn) + (fib2.r - 0.5) * 0.12;
+    let shell = 1.0 - rad + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn) + (fib2.r - 0.5) * 0.12) * ramp;
     var density = smoothstep(0.0, 0.1, shell);
     density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-    density *= smoothstep(0.0, 0.15, s) * (1.0 - 0.4 * smoothstep(5.5, LENGTH * unit, s));
+    density *= smoothstep(0.0, 0.15, s) * pow(1.0 - smoothstep(6.0, LENGTH * unit, s), 1.5);
+    // The expanded gas between the exit and the Mach disk is thin and see-through.
+    density *= 1.0 - 0.7 * expanded;
 
     // Soot: only the mixing zone is sooty; it is hotter in the core and along
     // the fibres. Absorbing and emitting.
     let core = 1.0 - rad * rad * 0.45;
-    let sootFrac = smoothstep(0.2, 0.7, s) * (1.0 - smoothstep(1.1, 3.0, s)) * (0.55 + 0.45 * n.g);
-    let sootT = 1450.0 + 850.0 * clamp(core * (0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
+    // Soot burns in the shear layer where the fuel-rich gas meets air.
+    let sootFrac = smoothstep(5.0, 6.5, sR) * (1.0 - smoothstep(9.0, 16.0, sR)) * (0.55 + 0.45 * n.g) * smoothstep(0.35, 0.85, rad);
+    let sootT = 1900.0 + 700.0 * clamp((0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
     let sootRadiance = blackbody(sootT) * plume.sootGain;
 
     // Gas glow: optically thin, so it adds along the ray instead of riding on
@@ -285,7 +312,13 @@ fn ign(p: vec2f) -> f32 {
     let axial = core * core * core;
     let glow = GAS_GLOW * (density * heat * (0.22 + 2.0 * axial + 2.8 * ridge) * plume.glowGain)
       // The densest, hottest core also radiates thermally (warm white).
-      + blackbody(2900.0) * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0);
+      + blackbody(2900.0) * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
+      // Exhaust leaving the nozzle: saturated white-blue, full jet width.
+      + mix(vec3f(1.0, 0.45, 0.7), vec3f(1.0, 0.97, 1.0), core * core) * (density * exitCore * (0.5 + 0.9 * core) * plume.exitGain * 0.7)
+      // Mach disk: a thin bright re-heated slab on the axis.
+      + DIAMOND_GLOW * (density * machDisk * plume.exitGain * 2.5)
+      // Cool expanded gas glows faintly violet (Swan bands) on the way there.
+      + mix(EXIT_GLOW, GAS_GLOW, 0.5) * (density * expanded * (0.4 + 0.6 * hairs) * plume.exitGain * 0.6);
 
     // Exit region: discrete engine jets read as sharp parallel streaks of
     // blue-violet gas, with the first diamonds glowing warm white.
@@ -307,7 +340,7 @@ fn ign(p: vec2f) -> f32 {
 
   // The near-nozzle gas is mostly transparent: let a slightly cooled, brighter
   // sky show through it so the exit reads as hot glass rather than smoke.
-  let shimmer = clamp(haze * 1.6, 0.0, 1.0);
+  let shimmer = clamp(haze * 1.6, 0.0, 1.0) * select(1.0, 0.0, hasSurface);
   let seenSky = mix(background, background * vec3f(1.15, 1.2, 1.25) + vec3f(0.03, 0.05, 0.06), shimmer);
   let result = color + transmittance * seenSky;
   return vec4f(result, 1.0);
