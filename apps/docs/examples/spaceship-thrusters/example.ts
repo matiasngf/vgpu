@@ -43,6 +43,7 @@ const LIGHTING = {
   ambient: 0.28,
   skyColor: [0.6, 0.72, 0.9],
   groundColor: [0.42, 0.38, 0.33],
+  /** In light-space NDC depth; the span is 4 * halfExtent world units, so this is ~0.03 units. */
   shadowBias: 0.0008,
 };
 /** Segment light that stands in for the plume's glow on the geometry. */
@@ -105,18 +106,15 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
   setConstants(effects, targets);
   setBindings(effects, geometry, targets);
   await prewarm(effects, geometry, targets, surface);
-  bakeNoise(gpu, effects, targets);
-
-  let sawInitialResize = false;
+  // Subscribe before the first frame: the bake frame applies any auto-resize
+  // that happened during prewarm, and target.resize() is a no-op for equal
+  // sizes, so handling the initial event is cheap and never misses a resize.
   const unsubscribeResize = surface.onResize(() => {
-    if (!sawInitialResize) {
-      sawInitialResize = true;
-      return;
-    }
     if (disposed) return;
     resizeTargets(targets, surface.size);
     setBindings(effects, geometry, targets);
   });
+  bakeStatic(gpu, effects, geometry, targets);
 
   const handle = gpu.frame.loop((frame) => {
     // Only the clock changes per frame; every other binding is stable.
@@ -131,6 +129,7 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
     handle.stop();
     unsubscribeResize();
     for (const mesh of geometry.meshes) mesh.destroy();
+    destroyTargets(targets);
     surface.dispose();
     gpu.dispose();
   };
@@ -144,7 +143,7 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbO
   setConstants(effects, targets);
   setBindings(effects, geometry, targets);
   await prewarm(effects, geometry, targets, target);
-  bakeNoise(gpu, effects, targets);
+  bakeStatic(gpu, effects, geometry, targets);
 
   effects.fire.set({ params: { time } });
   effects.composite.set({ composite: { time } });
@@ -156,6 +155,12 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbO
   }
   await gpu.settled();
   for (const mesh of geometry.meshes) mesh.destroy();
+  destroyTargets(targets);
+}
+
+/** Offscreen targets own their textures; release them when the graph is torn down. */
+function destroyTargets(targets: Targets): void {
+  for (const target of Object.values(targets)) (target as { destroy?: () => void }).destroy?.();
 }
 
 /**
@@ -307,7 +312,9 @@ function sunCamera() {
     SHADOW.center[2] + LIGHTING.sunDir[2] * SHADOW.distance,
   ];
   const e = SHADOW.halfExtent;
-  return multiply(orthographic(-e, e, -e, e, 1, SHADOW.distance * 2 + e), lookAt(eye, SHADOW.center));
+  // Keep the light-space depth span tight (scene is within ~2e of the centre)
+  // so the NDC bias stays a small fraction of a world unit.
+  return multiply(orthographic(-e, e, -e, e, SHADOW.distance - 2 * e, SHADOW.distance + 2 * e), lookAt(eye, SHADOW.center));
 }
 
 async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, output: Output): Promise<void> {
@@ -322,19 +329,22 @@ async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, o
   ]);
 }
 
-/** Bakes the noise textures. Called once; the fire and scene passes only ever read them. */
-function bakeNoise(gpu: Gpu, effects: Effects, targets: Targets): void {
+/**
+ * Bakes everything that never changes: the noise textures and the sun shadow
+ * map (static light, static geometry). Called once after prewarm; the per-frame
+ * chain only reads these targets.
+ */
+function bakeStatic(gpu: Gpu, effects: Effects, geometry: Geometry, targets: Targets): void {
   gpu.frame((frame) => {
     frame.pass({ target: targets.noiseAtlas, clear: CLEAR }, (pass) => pass.draw(effects.bakeNoise));
     frame.pass({ target: targets.detail, clear: CLEAR }, (pass) => pass.draw(effects.bakeDetail));
+    frame.pass({ target: targets.shadow, clear: [1, 0, 0, 1] }, (pass) => {
+      for (const draw of geometry.shadowDraws) pass.draw(draw);
+    });
   });
 }
 
 function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets: Targets, output: Output): void {
-  // Shadow map is static geometry but cheap; re-render it so the bundle stays simple.
-  frame.pass({ target: targets.shadow, clear: [1, 0, 0, 1] }, (pass) => {
-    for (const draw of geometry.shadowDraws) pass.draw(draw);
-  });
   // Depth attachment cleared to 0 in colors[1] means "no surface" for the plume.
   frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => {
     for (const draw of geometry.draws) pass.draw(draw);

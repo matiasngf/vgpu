@@ -152,15 +152,29 @@ fn coneInterval(o: vec3f, d: vec3f) -> vec2f {
   let a = dd * dd - cos2;
   let b = 2.0 * (dd * wD - dot(d, w) * cos2);
   let c = wD * wD - dot(w, w) * cos2;
-  let disc = b * b - 4.0 * a * c;
-  if (disc < 0.0 || a >= 0.0) { return vec2f(1.0, 0.0); }
-  let sq = sqrt(disc);
-  var t0 = (-b + sq) / (2.0 * a);
-  var t1 = (-b - sq) / (2.0 * a);
-  if (t0 > t1) { let tmp = t0; t0 = t1; t1 = tmp; }
+  var t0 = 0.0;
+  var t1 = 0.0;
+  if (abs(a) < 1e-5) {
+    // Ray parallel to the cone surface: one crossing, inside on one side.
+    if (abs(b) < 1e-6) { return vec2f(1.0, 0.0); }
+    let t = -c / b;
+    if (b > 0.0) { t0 = -1e9; t1 = t; } else { t0 = t; t1 = 1e9; }
+  } else {
+    let disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) { return vec2f(1.0, 0.0); }
+    let sq = sqrt(disc);
+    t0 = min((-b + sq) / (2.0 * a), (-b - sq) / (2.0 * a));
+    t1 = max((-b + sq) / (2.0 * a), (-b - sq) / (2.0 * a));
+    if (a > 0.0) {
+      // Ray steeper than the cone (looking nearly along the axis): the ray is
+      // inside the double cone outside [t0, t1]; keep the forward-nappe half.
+      let forward = dot(o + d * t1 - apex, AXIS) > 0.0;
+      if (forward) { t0 = t1; t1 = 1e9; } else { t1 = t0; t0 = -1e9; }
+    }
+  }
   // Reject the mirror nappe.
-  let mid = o + d * (0.5 * (t0 + t1));
-  if (dot(mid - apex, AXIS) < 0.0) { return vec2f(1.0, 0.0); }
+  let probe = o + d * clamp(0.5 * (t0 + t1), max(t0, 0.0), max(t1, 0.0));
+  if (dot(probe - apex, AXIS) < 0.0) { return vec2f(1.0, 0.0); }
   // Slab 0 <= s <= LENGTH along the axis (s measured from the nozzle).
   let sA = dot(o - NOZZLE, AXIS);
   if (abs(dd) > 1e-4) {
@@ -204,10 +218,10 @@ fn ign(p: vec2f) -> f32 {
   // Heat haze: hot air around the plume refracts whatever is behind it. The
   // path length through the bounding cone says how close the ray passes to
   // the axis; a scrolling noise field jitters the background lookup.
-  let pathThroughCone = max(interval.y - interval.x, 0.0) * params.sceneScale.x;
+  let pathThroughCone = max(interval.y - interval.x, 0.0);
   let heatHaze = smoothstep(0.0, plume.r0 * 3.0, pathThroughCone) * 0.6;
   let wobble = (textureSampleLevel(detail, detailSamp, position.xy / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze;
-  let hazePixel = scenePixel + vec2i(wobble * params.sceneScale);
+  let hazePixel = clamp(scenePixel + vec2i(wobble * params.sceneScale), vec2i(0), vec2i(textureDimensions(sceneDepth)) - 1);
   let hazeSurface = textureLoad(sceneDepth, hazePixel, 0).r > 0.0;
   let background = select(sky(dir), textureLoad(sceneColor, select(scenePixel, hazePixel, hazeSurface), 0).rgb, hasSurface);
   if (interval.y <= interval.x) {
@@ -215,6 +229,7 @@ fn ign(p: vec2f) -> f32 {
   }
 
   let frame = plumeFrame();
+  let coreWhite = blackbody(2900.0);
   let dtWorld = (interval.y - interval.x) / f32(STEPS);
   var t = interval.x + dtWorld * ign(position.xy);
   var color = vec3f(0.0);
@@ -312,7 +327,7 @@ fn ign(p: vec2f) -> f32 {
     let axial = core * core * core;
     let glow = GAS_GLOW * (density * heat * (0.22 + 2.0 * axial + 2.8 * ridge) * plume.glowGain)
       // The densest, hottest core also radiates thermally (warm white).
-      + blackbody(2900.0) * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
+      + coreWhite * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
       // Exhaust leaving the nozzle: saturated white-blue, full jet width.
       + mix(vec3f(1.0, 0.45, 0.7), vec3f(1.0, 0.97, 1.0), core * core) * (density * exitCore * (0.5 + 0.9 * core) * plume.exitGain * 0.7)
       // Mach disk: a thin bright re-heated slab on the axis.
