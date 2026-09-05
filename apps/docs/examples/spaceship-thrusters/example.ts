@@ -32,7 +32,7 @@ export interface ThrusterThumbOptions {
 const AXIS_HEIGHT = 1.7;
 /** Exhaust direction: horizontal +X (nozzle exit at the origin). */
 const PLUME_AXIS: Vec3 = [1, 0, 0];
-const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.35, glowGain: 10, exitGain: 5 };
+const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.2, glowGain: 10, exitGain: 5 };
 const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
 /** Orthographic sun camera covering the stand and the near plume. */
 const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
