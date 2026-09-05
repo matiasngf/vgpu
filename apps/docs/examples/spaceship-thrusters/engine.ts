@@ -252,9 +252,10 @@ export function buildStand(engineLength: number, axisHeight: number): CadMesh {
   for (const z of [-1.2, 1.2]) merge(mesh, iBeam([frameCenter, 0, z], frameLength, 0.36, 0.3, 'x'));
   for (const x of [headX - 1.2, headX + 1.4, 0.4]) merge(mesh, iBeam([x, 0, 0], 2.7, 0.36, 0.3, 'z'));
   // Thrust plate (vertical) with a stiffening frame and hold-down bolts.
-  merge(mesh, box([headX - 0.9, axisHeight, 0], [0.22, axisHeight * 2 + 0.4, 3.0], MAT_PAINT));
-  for (const z of [-1.35, 1.35]) merge(mesh, box([headX - 0.9, axisHeight, z], [0.34, axisHeight * 2 + 0.4, 0.28], MAT_PAINT));
-  merge(mesh, box([headX - 0.9, axisHeight * 2 + 0.34, 0], [0.34, 0.28, 3.0], MAT_PAINT));
+  const plateHeight = axisHeight * 2 + 0.4;
+  merge(mesh, box([headX - 0.9, plateHeight / 2, 0], [0.22, plateHeight, 3.0], MAT_PAINT));
+  for (const z of [-1.35, 1.35]) merge(mesh, box([headX - 0.9, plateHeight / 2, z], [0.34, plateHeight, 0.28], MAT_PAINT));
+  merge(mesh, box([headX - 0.9, plateHeight + 0.14, 0], [0.34, 0.28, 3.0], MAT_PAINT));
   // Rear anchor block and two gusset webs bracing the plate.
   merge(mesh, box([headX - 1.6, 0.25, 0], [1.1, 0.5, 3.2], MAT_PAINT));
   for (const z of [-1.25, 1.25]) merge(mesh, box([headX - 1.35, axisHeight * 0.6, z], [0.6, axisHeight * 1.2, 0.1], MAT_PAINT));
