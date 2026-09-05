@@ -18,22 +18,22 @@ struct Lighting {
   groundColor: vec3f,
   shadowBias: f32,
   sunViewProj: mat4x4f,
+  shadowExtent: f32,    // world units covered by the shadow map
 }
 
-// Point lights sampled along the plume so the engine and pad pick up its glow.
+// The plume lights the engine and pad as a line segment: the closest point
+// on the axis illuminates each fragment, with intensity and colour that
+// follow the exhaust (blue-white at the exit, pink further out).
 struct PlumeLight {
-  position: vec3f,
+  nozzle: vec3f,
+  length: f32,
+  axis: vec3f,
   intensity: f32,
-}
-struct PlumeLights {
-  color: vec3f,
-  count: u32,
-  lights: array<PlumeLight, 8>,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> lighting: Lighting;
-@group(0) @binding(2) var<uniform> plumeLights: PlumeLights;
+@group(0) @binding(2) var<uniform> plumeLight: PlumeLight;
 @group(0) @binding(3) var detail: texture_2d<f32>;
 @group(0) @binding(4) var detailSamp: sampler;
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
@@ -76,8 +76,8 @@ struct Material {
 
 // Soot streak the exhaust leaves on the pad: darkens along +X from the nozzle.
 fn scorch(world: vec3f) -> f32 {
-  let along = smoothstep(1.5, 6.0, world.x) * (1.0 - smoothstep(24.0, 40.0, world.x));
-  let across = 1.0 - smoothstep(0.8, 2.6 + world.x * 0.06, abs(world.z));
+  let along = smoothstep(0.3, 3.5, world.x) * (1.0 - smoothstep(24.0, 40.0, world.x));
+  let across = 1.0 - smoothstep(0.8, 1.1 + world.x * 0.07, abs(world.z));
   let breakup = textureSampleLevel(detail, detailSamp, world.xz * vec2f(0.03, 0.09), 0.0).r;
   return along * across * (0.55 + 0.6 * breakup);
 }
@@ -90,43 +90,53 @@ fn materialFor(id: u32, world: vec3f) -> Material {
     case 3u: {                                                                // concrete pad
       let grain = textureSampleLevel(detail, detailSamp, world.xz * 0.045, 0.0);
       let fine = textureSampleLevel(detail, detailSamp, world.xz * 0.6, 0.0).r;
-      let joints = 1.0 - 0.18 * (1.0 - smoothstep(0.0, 0.012, min(abs(fract(world.x / 8.0 + 0.5) - 0.5), abs(fract(world.z / 8.0 + 0.5) - 0.5))));
+      let cell = world.xz / 8.0 + vec2f(0.25, 0.5);
+      let joints = 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.014, min(abs(fract(cell.x) - 0.5), abs(fract(cell.y) - 0.5))));
+      let slab = floor(cell + 0.5);
+      let tone = 0.92 + 0.14 * fract(sin(dot(slab, vec2f(12.9898, 78.233))) * 43758.5453);
       let patches = textureSampleLevel(detail, detailSamp, world.xz * 0.012 + vec2f(0.3, 0.7), 0.0).r;
-      let albedo = vec3f(0.33, 0.315, 0.285) * (0.72 + 0.3 * grain.r + 0.1 * fine + 0.25 * patches) * joints;
-      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.75), 0.9, 0.0);
+      let albedo = vec3f(0.33, 0.315, 0.285) * (0.72 + 0.3 * grain.r + 0.1 * fine + 0.25 * patches) * joints * tone;
+      let burn = scorch(world);
+      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), burn * 0.8), 0.9 + 0.08 * burn, 0.0);
     }
     case 4u: {                                                                // gravel apron
       let grain = textureSampleLevel(detail, detailSamp, world.xz * 0.12, 0.0);
       let fine = textureSampleLevel(detail, detailSamp, world.xz * 1.1, 0.0).g;
-      let albedo = vec3f(0.26, 0.235, 0.20) * (0.7 + 0.5 * grain.r + 0.3 * fine);
+      let stone = textureSampleLevel(detail, detailSamp, world.xz * 2.5, 0.0).b;
+      var albedo = vec3f(0.36, 0.32, 0.26) * (0.85 + 0.25 * grain.r + 0.3 * fine);
+      albedo *= mix(0.65, 1.45, smoothstep(0.35, 0.75, stone));
       return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.6), 0.95, 0.0);
     }
-    case 5u: { return Material(vec3f(0.16, 0.165, 0.16), 0.6, 0.3); }      // painted steel (stand)
-    default: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0); }         // white decal
+    case 5u: {                                                                // painted dark steel (stand), worn
+      let wear = textureSampleLevel(detail, detailSamp, world.xz * 0.7 + world.y * 0.37, 0.0).g;
+      return Material(vec3f(0.075, 0.08, 0.085) * (0.75 + 0.5 * wear), 0.5 + 0.25 * wear, 0.35);
+    }
+    case 6u: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0); }         // white decal
+    default: { return Material(vec3f(0.85, 0.6, 0.08), 0.5, 0.2); }          // safety yellow
   }
 }
 
-// 3x3 PCF against the light-space depth written by shadow.wgsl.
+// Bilinear-weighted 2x2 PCF against the light-space depth from shadow.wgsl.
 fn sunVisibility(world: vec3f, n: vec3f) -> f32 {
-  // Normal-offset + slope-scaled bias: one shadow texel is ~0.02 world units.
+  // Normal-offset + slope-scaled bias, both in shadow texels.
   let ndl = clamp(dot(n, lighting.sunDir), 0.0, 1.0);
-  let texelWorld = lighting.shadowTexel * 44.0;
+  let texelWorld = lighting.shadowTexel * lighting.shadowExtent;
   let offsetWorld = world + n * texelWorld * (1.5 + 3.0 * (1.0 - ndl));
   let clip = lighting.sunViewProj * vec4f(offsetWorld, 1.0);
   let ndc = clip.xyz / clip.w;
   if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0) { return 1.0; }
   let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
   let size = vec2f(textureDimensions(shadowMap));
-  let base = uv * size;
-  var lit = 0.0;
-  for (var y = -1; y <= 1; y++) {
-    for (var x = -1; x <= 1; x++) {
-      let texel = vec2i(base + vec2f(f32(x), f32(y)));
-      let stored = textureLoad(shadowMap, clamp(texel, vec2i(0), vec2i(size) - 1), 0).r;
-      lit += select(0.0, 1.0, ndc.z - lighting.shadowBias * (1.0 + 2.0 * (1.0 - ndl)) <= stored);
-    }
+  let base = uv * size - 0.5;
+  let i0 = vec2i(floor(base));
+  let f = fract(base);
+  let bias = lighting.shadowBias * (1.0 + 2.0 * (1.0 - ndl));
+  var taps = array<f32, 4>();
+  for (var k = 0; k < 4; k++) {
+    let texel = clamp(i0 + vec2i(k & 1, k >> 1), vec2i(0), vec2i(size) - 1);
+    taps[k] = select(0.0, 1.0, ndc.z - bias <= textureLoad(shadowMap, texel, 0).r);
   }
-  return lit / 9.0;
+  return mix(mix(taps[0], taps[1], f.x), mix(taps[2], taps[3], f.x), f.y);
 }
 
 fn fresnelSchlick(cosTheta: f32, f0: vec3f) -> vec3f {
@@ -172,13 +182,18 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   let ambientSpec = fresnelSchlick(max(dot(n, v), 0.0), f0) * (1.0 - m.roughness) * 0.5;
   color += mix(lighting.groundColor, lighting.skyColor, up) * lighting.ambient * (m.albedo * (1.0 - m.metallic) + ambientSpec);
 
-  // Plume glow: a few point lights along the exhaust axis.
-  for (var i = 0u; i < plumeLights.count; i++) {
-    let light = plumeLights.lights[i];
-    let toLight = light.position - in.world;
+  // Plume glow: closest point on the exhaust segment, colour following the
+  // exhaust (blue-white at the exit, pink downstream), intensity peaking in
+  // the afterburning zone.
+  {
+    let s = clamp(dot(in.world - plumeLight.nozzle, plumeLight.axis), 0.0, plumeLight.length);
+    let p = plumeLight.nozzle + plumeLight.axis * s;
+    let toLight = p - in.world;
     let dist2 = max(dot(toLight, toLight), 0.25);
     let l = toLight * inverseSqrt(dist2);
-    color += shade(n, v, l, plumeLights.color * (light.intensity / dist2), m);
+    let profile = 0.25 + smoothstep(0.0, 6.0, s) * (1.0 - smoothstep(18.0, 32.0, s));
+    let tint = mix(vec3f(0.75, 0.8, 1.0), vec3f(1.0, 0.55, 0.42), smoothstep(1.0, 8.0, s));
+    color += shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
   }
 
   var out: FragOut;

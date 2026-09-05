@@ -38,7 +38,7 @@ describe('parametric engine', () => {
   });
 
   it('builds a stand and ground that sit on the pad', () => {
-    const stand = pack(buildStand(5.1, 1.7));
+    const stand = pack(buildStand(DEFAULT_ENGINE, 1.7));
     const ground = pack(buildGround());
     expect(bounds(stand.positions).min[1]).toBeCloseTo(0, 5);
     expect(bounds(ground.positions).max[1]).toBeCloseTo(0, 5);

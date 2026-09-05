@@ -10,7 +10,7 @@ import fireWgsl from './fire.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
 import { invert, lookAt, multiply, orthographic, pack, perspective, type Vec3 } from './cad';
-import { buildEngine, buildGround, buildStand, DEFAULT_ENGINE, engineToStand } from './engine';
+import { buildEngine, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand } from './engine';
 
 type Output = Surface | Target;
 
@@ -33,21 +33,20 @@ const AXIS_HEIGHT = 1.7;
 /** Exhaust direction: horizontal +X (nozzle exit at the origin). */
 const PLUME_AXIS: Vec3 = [1, 0, 0];
 const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.95, spread: 0.05, length: 45, sootGain: 0.45, glowGain: 10, exitGain: 5 };
-const CAMERA = { position: [-9.5, 11.5, 11] as Vec3, target: [-0.5, 1.6, -0.5] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
+const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
 /** Orthographic sun camera covering the stand and the near plume. */
-const SHADOW = { size: 2048, halfExtent: 22, center: [0, 1, 0] as Vec3, distance: 60 };
+const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
 const LIGHTING = {
-  sunDir: normalize3([-0.55, 0.62, -0.45]),
-  sunIntensity: 3.0,
+  sunDir: normalize3([-0.35, 0.72, -0.6]),
+  sunIntensity: 3.8,
   sunColor: [1.0, 0.96, 0.9],
-  ambient: 0.42,
-  skyColor: [0.55, 0.68, 0.85],
+  ambient: 0.28,
+  skyColor: [0.6, 0.72, 0.9],
   groundColor: [0.42, 0.38, 0.33],
   shadowBias: 0.0008,
 };
-/** Point lights along the plume: (distance along axis, intensity). */
-const PLUME_LIGHT_SAMPLES: readonly [number, number][] = [[1.5, 30], [4, 60], [8, 90], [13, 90], [20, 70], [28, 40]];
-const PLUME_LIGHT_COLOR = [1.0, 0.5, 0.45];
+/** Segment light that stands in for the plume's glow on the geometry. */
+const PLUME_LIGHT = { length: 32, intensity: 110 };
 
 interface Effects {
   bakeNoise: Effect;
@@ -223,10 +222,10 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
 
 /** Builds the parametric engine, stand and pad and uploads them as three draws. */
 function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: string): Geometry {
-  const engineLength = DEFAULT_ENGINE.chamberTop + 0.46 + 1.9;
   const parts = [
     ['engine', engineToStand(buildEngine(DEFAULT_ENGINE), AXIS_HEIGHT)],
-    ['stand', buildStand(engineLength, AXIS_HEIGHT)],
+    ['stand', buildStand(DEFAULT_ENGINE, AXIS_HEIGHT)],
+    ['gantry', buildGantry()],
     ['ground', buildGround()],
   ] as const;
   const meshes: Mesh[] = [];
@@ -278,16 +277,12 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets): vo
   const view = lookAt(CAMERA.position, CAMERA.target);
   const projection = perspective((CAMERA.fovDeg * Math.PI) / 180, width / height, CAMERA.near, CAMERA.far);
   const viewProj = multiply(projection, view);
-  const plumeLights = PLUME_LIGHT_SAMPLES.map(([s, intensity]) => ({
-    position: [PLUME.nozzle[0] + PLUME_AXIS[0] * s, PLUME.nozzle[1] + PLUME_AXIS[1] * s, PLUME.nozzle[2] + PLUME_AXIS[2] * s],
-    intensity,
-  }));
   const sunViewProj = sunCamera();
   for (const draw of geometry.draws) {
     draw.set({
       camera: { viewProj, position: CAMERA.position, time: 0 },
-      lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, sunViewProj },
-      plumeLights: { color: PLUME_LIGHT_COLOR, count: plumeLights.length, lights: plumeLights },
+      lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, shadowExtent: 2 * SHADOW.halfExtent, sunViewProj },
+      plumeLight: { nozzle: PLUME.nozzle, axis: PLUME_AXIS, ...PLUME_LIGHT },
     });
   }
   for (const draw of geometry.shadowDraws) draw.set({ light: { viewProj: sunViewProj } });
