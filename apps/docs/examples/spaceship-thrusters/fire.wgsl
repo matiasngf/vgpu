@@ -140,7 +140,9 @@ fn fireProfile(sR: f32) -> f32 {
 }
 
 fn glowProfile(sR: f32) -> f32 {
-  return mix(0.7, 0.12, smoothstep(2.6, 6.0, sR));
+  // Starts a little downstream of the lip (a visible gap of thin gas first),
+  // ~0.6 of the exit wide, then shrinks while it fades.
+  return mix(0.6, 0.12, smoothstep(3.0, 6.3, sR));
 }
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
@@ -267,11 +269,11 @@ fn ign(p: vec2f) -> f32 {
     //   burn/heat — afterburning of CO/H2 with entrained air, the intense
     //               pink-white fire that ignites inside the envelope
     //   shock     — the exit-gas regime (blue-violet engine jets), fading out
-    let exitCore = 1.0 - smoothstep(2.5, 6.0, sR);
+    let exitCore = smoothstep(1.0, 1.8, sR) * (1.0 - smoothstep(3.0, 6.3, sR));
     let machDisk = exp(-pow((sR - 2.2) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
     let shock = 1.0 - smoothstep(0.0, 5.0, sR);
     // The fire starts soft and translucent and gains body as it opens up.
-    let fireStrength = mix(0.12, 1.0, smoothstep(1.0, 8.0, sR));
+    let fireStrength = mix(0.06, 1.0, smoothstep(1.5, 8.5, sR));
     let burn = smoothstep(2.0, 8.0, sR);
     let heat = smoothstep(4.0, 11.0, sR);
 
