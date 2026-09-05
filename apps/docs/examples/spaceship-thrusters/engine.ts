@@ -337,7 +337,7 @@ function iBeam(center: Vec3, length: number, height: number, width: number, axis
 /** A yellow lifting gantry in the background for scale and a colour accent. */
 export function buildGantry(): CadMesh {
   const mesh = emptyMesh();
-  const base: Vec3 = [-8, 0, -14];
+  const base: Vec3 = [-9, 0, -17.5];
   for (const z of [-1.5, 1.5]) merge(mesh, box([base[0], 2.25, base[2] + z], [0.4, 4.5, 0.4], MAT_YELLOW));
   merge(mesh, box([base[0], 4.7, base[2]], [0.4, 0.4, 3.4], MAT_YELLOW));
   merge(mesh, box([base[0] + 2.5, 4.7, base[2]], [5.4, 0.3, 0.3], MAT_YELLOW));
