@@ -186,9 +186,18 @@ fn ign(p: vec2f) -> f32 {
   let scenePixel = vec2i(position.xy * params.sceneScale);
   let surfaceDistance = textureLoad(sceneDepth, scenePixel, 0).r;
   let hasSurface = surfaceDistance > 0.0;
-  let background = select(sky(dir), textureLoad(sceneColor, scenePixel, 0).rgb, hasSurface);
   var interval = coneInterval(origin, dir);
   if (hasSurface) { interval.y = min(interval.y, surfaceDistance); }
+
+  // Heat haze: hot air around the plume refracts whatever is behind it. The
+  // path length through the bounding cone says how close the ray passes to
+  // the axis; a scrolling noise field jitters the background lookup.
+  let pathThroughCone = max(interval.y - interval.x, 0.0) * params.sceneScale.x;
+  let heatHaze = smoothstep(0.0, plume.r0 * 3.0, pathThroughCone) * 0.6;
+  let wobble = (textureSampleLevel(detail, detailSamp, position.xy / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze;
+  let hazePixel = scenePixel + vec2i(wobble * params.sceneScale);
+  let hazeSurface = textureLoad(sceneDepth, hazePixel, 0).r > 0.0;
+  let background = select(sky(dir), textureLoad(sceneColor, select(scenePixel, hazePixel, hazeSurface), 0).rgb, hasSurface);
   if (interval.y <= interval.x) {
     return vec4f(background, 1.0);
   }
