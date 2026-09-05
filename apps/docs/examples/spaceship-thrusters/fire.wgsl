@@ -137,7 +137,7 @@ fn blackbody(temperature: f32) -> vec3f {
 //    exit, then nothing through the induction gap, then the afterburner that
 //    ignites narrow inside the envelope and grows until it overflows it.
 fn envelopeProfile(sR: f32) -> f32 {
-  return mix(1.0, 0.7, smoothstep(0.5, 6.0, sR)) + 0.045 * max(sR - 6.0, 0.0);
+  return mix(1.0, 0.8, smoothstep(0.3, 2.5, sR)) + 0.035 * max(sR - 3.0, 0.0);
 }
 
 fn coreProfile(sR: f32) -> f32 {
@@ -271,7 +271,7 @@ fn ign(p: vec2f) -> f32 {
     //               pink-white fire that ignites inside the envelope
     //   shock     — the exit-gas regime (blue-violet engine jets), fading out
     let exitCore = 1.0 - smoothstep(1.5, 2.6, sR);
-    let machDisk = exp(-pow((sR - 4.5) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
+    let machDisk = exp(-pow((sR - 3.0) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
     let shock = 1.0 - smoothstep(0.0, 5.0, sR);
     let burn = smoothstep(4.2, 6.5, sR);
     let heat = smoothstep(5.0, 8.5, sR);
@@ -314,7 +314,7 @@ fn ign(p: vec2f) -> f32 {
 
     // Envelope: smooth, translucent hot gas with only a little edge breakup.
     let shellEnv = 1.0 - radEnv + (turb * 0.12 + (fib2.r - 0.5) * 0.1) * ramp;
-    let densityEnv = smoothstep(0.0, 0.3, shellEnv) * (0.6 + 0.4 * n.g) * fadeEnd;
+    let densityEnv = smoothstep(0.0, 0.15, shellEnv) * (0.7 + 0.3 * n.g) * fadeEnd;
 
     // Exit capsule: smooth, dense, opaque white — the exhaust is still one
     // solid supersonic jet here, no fibres yet.
