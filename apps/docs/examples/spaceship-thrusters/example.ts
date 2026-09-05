@@ -269,12 +269,12 @@ function setConstants(effects: Effects, targets: Targets): void {
     detailSamp: effects.repeatSampler,
     plume: { ...PLUME, axis: PLUME_AXIS },
   });
-  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 0.8, knee: 0.6 } });
+  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.3, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.9, grain: 0.015, time: 0 } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.45, grain: 0.015, time: 0 } });
 }
 
 function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {

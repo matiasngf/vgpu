@@ -137,12 +137,12 @@ fn blackbody(temperature: f32) -> vec3f {
 //    exit, then nothing through the induction gap, then the afterburner that
 //    ignites narrow inside the envelope and grows until it overflows it.
 fn envelopeProfile(sR: f32) -> f32 {
-  return mix(1.0, 0.62, smoothstep(0.5, 6.0, sR)) + 0.03 * max(sR - 6.0, 0.0);
+  return mix(1.0, 0.7, smoothstep(0.5, 6.0, sR)) + 0.045 * max(sR - 6.0, 0.0);
 }
 
 fn coreProfile(sR: f32) -> f32 {
-  let capsule = 0.9 * (1.0 - smoothstep(1.4, 3.2, sR));
-  let burner = smoothstep(4.2, 6.5, sR) * mix(0.35, 1.0, smoothstep(5.5, 9.5, sR)) * mix(1.0, 1.7, smoothstep(9.0, 16.0, sR));
+  let capsule = 0.85 * (1.0 - smoothstep(1.8, 3.4, sR));
+  let burner = smoothstep(4.0, 6.0, sR) * mix(0.22, 1.0, smoothstep(5.0, 11.0, sR)) * mix(1.0, 1.7, smoothstep(10.0, 18.0, sR));
   return max(capsule, burner);
 }
 
@@ -270,7 +270,7 @@ fn ign(p: vec2f) -> f32 {
     //   burn/heat — afterburning of CO/H2 with entrained air, the intense
     //               pink-white fire that ignites inside the envelope
     //   shock     — the exit-gas regime (blue-violet engine jets), fading out
-    let exitCore = 1.0 - smoothstep(1.2, 2.6, sR);
+    let exitCore = 1.0 - smoothstep(1.5, 2.6, sR);
     let machDisk = exp(-pow((sR - 4.5) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
     let shock = 1.0 - smoothstep(0.0, 5.0, sR);
     let burn = smoothstep(4.2, 6.5, sR);
@@ -316,6 +316,10 @@ fn ign(p: vec2f) -> f32 {
     let shellEnv = 1.0 - radEnv + (turb * 0.12 + (fib2.r - 0.5) * 0.1) * ramp;
     let densityEnv = smoothstep(0.0, 0.3, shellEnv) * (0.6 + 0.4 * n.g) * fadeEnd;
 
+    // Exit capsule: smooth, dense, opaque white — the exhaust is still one
+    // solid supersonic jet here, no fibres yet.
+    let capsuleDensity = smoothstep(0.0, 0.2, 1.0 - radCore + turb * 0.05 * ramp) * exitCore * fadeEnd;
+
     // Core: the fibrous fire. Fibres both erode the shell and poke past it.
     let shellCore = 1.0 - radCore + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn) + (fib2.r - 0.5) * 0.12) * ramp;
     var density = smoothstep(0.0, 0.1, shellCore);
@@ -339,12 +343,12 @@ fn ign(p: vec2f) -> f32 {
       // The densest, hottest core also radiates thermally (warm white).
       + coreWhite * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
       // Exhaust capsule leaving the nozzle: saturated white-blue, full width.
-      + mix(vec3f(1.0, 0.45, 0.7), vec3f(1.0, 0.97, 1.0), core * core) * (density * exitCore * (0.5 + 0.9 * core) * plume.exitGain * 0.7)
+      + mix(vec3f(1.0, 0.6, 0.8), vec3f(1.0, 0.98, 1.0), clamp(core, 0.0, 1.0)) * (capsuleDensity * (0.6 + 0.8 * core) * plume.exitGain * 12.0)
       // The hot-gas envelope glows faintly violet near the exit, pink further
       // out, brighter around the capsule and along the fibres.
-      + mix(EXIT_GLOW, GAS_GLOW, smoothstep(2.0, 8.0, sR)) * (densityEnv * (0.5 + 0.5 * hairs) * (1.0 + 1.5 * exitCore) * plume.exitGain * 1.1)
+      + mix(EXIT_GLOW, GAS_GLOW, smoothstep(2.0, 8.0, sR)) * (densityEnv * (0.5 + 0.5 * hairs) * plume.exitGain * 0.28)
       // Mach disk: a thin bright re-heated slab in the envelope at the neck.
-      + DIAMOND_GLOW * (densityEnv * machDisk * plume.exitGain * 0.9);
+      + DIAMOND_GLOW * (densityEnv * machDisk * plume.exitGain * 0.5);
 
     // Exit region: discrete engine jets read as sharp parallel streaks of
     // blue-violet gas, with the first diamonds glowing warm white.
@@ -355,7 +359,7 @@ fn ign(p: vec2f) -> f32 {
 
     // High absorption in the fire keeps its visible layer thin, so fibres at
     // different depths do not average into mush; the envelope stays thin.
-    let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + densityEnv * 1.3 + hazeDensity * 0.35;
+    let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + capsuleDensity * 6.0 + densityEnv * 0.7 + hazeDensity * 0.35;
     let alpha = 1.0 - exp(-sigma * dt);
     color += transmittance * (sootRadiance * sootFrac * alpha + (glow + exitGlow + diamondGlow) * dt);
     haze += transmittance * hazeDensity * dt;
