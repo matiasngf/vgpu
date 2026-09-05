@@ -126,29 +126,21 @@ fn blackbody(temperature: f32) -> vec3f {
 }
 
 // Two nested bodies, both in exit radii as a function of distance in exit
-// radii (measured on a single-engine sea-level test and matching the
-// over-expanded-jet + afterburning physics):
+// radii (matched to a single-engine sea-level test firing):
 //
-// 1. envelopeProfile — the hot exhaust GAS. Leaves at the lip width, is
-//    squeezed gently by ambient pressure toward the first Mach disk, then
-//    drifts wider as it mixes with air. Translucent, faint violet-pink, the
-//    whole way.
-// 2. coreProfile — the bright FIRE inside it: the exhaust capsule right at the
-//    exit, then nothing through the induction gap, then the afterburner that
-//    ignites narrow inside the envelope and grows until it overflows it.
-fn envelopeProfile(sR: f32) -> f32 {
-  // Closes from the lip to ~0.82 within about a diameter, then runs nearly
-  // parallel, only drifting wider with mixing far downstream.
-  return mix(1.0, 0.82, smoothstep(0.2, 1.6, sR)) + 0.02 * max(sR - 4.0, 0.0);
+// 1. fireProfile — the FIRE itself, one body from lip to tail: it leaves at
+//    the lip width soft and translucent, is squeezed a little by ambient
+//    pressure, then opens up and intensifies into the fibrous pink
+//    afterburning plume.
+// 2. glowProfile — the white GLOW inside it at the exit: a teardrop that
+//    shrinks while it fades out.
+fn fireProfile(sR: f32) -> f32 {
+  let squeeze = mix(1.0, 0.85, smoothstep(0.2, 2.0, sR));
+  return mix(squeeze, 1.7, smoothstep(3.5, 14.0, sR));
 }
 
-fn coreProfile(sR: f32) -> f32 {
-  // Teardrop: ~0.7 of the exit for ~1.5 diameters, tapering to a thin core
-  // (~0.3) that keeps going and fades; the afterburner then grows out of
-  // that thin core until it overflows the envelope.
-  let capsule = mix(0.7, 0.3, smoothstep(2.8, 5.0, sR));
-  let burner = mix(0.3, 1.0, smoothstep(5.5, 12.0, sR)) * mix(1.0, 1.7, smoothstep(11.0, 19.0, sR));
-  return max(capsule, burner);
+fn glowProfile(sR: f32) -> f32 {
+  return mix(0.7, 0.12, smoothstep(2.6, 6.0, sR));
 }
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
@@ -256,17 +248,17 @@ fn ign(p: vec2f) -> f32 {
     let sWorld = dot(rel, AXIS);
     let q = rel - AXIS * sWorld;
     let sR = sWorld / plume.r0; // distance in exit radii
-    let envelopeWorld = plume.r0 * envelopeProfile(sR) + plume.spread * max(sWorld - 10.0 * plume.r0, 0.0);
-    let coreWorld = plume.r0 * max(coreProfile(sR), 0.02) + plume.spread * max(sWorld - 12.0 * plume.r0, 0.0);
-    let radEnv = length(q) / envelopeWorld;
-    let radCore = length(q) / coreWorld;
+    let fireWorld = plume.r0 * fireProfile(sR) + plume.spread * max(sWorld - 12.0 * plume.r0, 0.0);
+    let glowWorld = plume.r0 * glowProfile(sR);
+    let radEnv = length(q) / fireWorld;   // fire body
+    let radCore = length(q) / glowWorld;  // white exit glow
     // Everything below is expressed in "plume units" (the look was tuned for
     // an exit radius of 0.3), so the same shader fits any engine size.
     let unit = 0.3 / plume.r0;
     let s = sWorld * unit;
     let qx = dot(q, frame[0]) * unit;
     let qy = dot(q, frame[1]) * unit;
-    let radius = envelopeWorld * unit;
+    let radius = fireWorld * unit;
     let dt = dtWorld * unit;
 
     // Flow regimes along the jet, in exit radii:
@@ -275,11 +267,13 @@ fn ign(p: vec2f) -> f32 {
     //   burn/heat — afterburning of CO/H2 with entrained air, the intense
     //               pink-white fire that ignites inside the envelope
     //   shock     — the exit-gas regime (blue-violet engine jets), fading out
-    let exitCore = 1.0 - smoothstep(2.5, 6.5, sR);
+    let exitCore = 1.0 - smoothstep(2.5, 6.0, sR);
     let machDisk = exp(-pow((sR - 2.2) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
     let shock = 1.0 - smoothstep(0.0, 5.0, sR);
-    let burn = smoothstep(5.0, 9.0, sR);
-    let heat = smoothstep(6.0, 11.0, sR);
+    // The fire starts soft and translucent and gains body as it opens up.
+    let fireStrength = mix(0.12, 1.0, smoothstep(1.0, 8.0, sR));
+    let burn = smoothstep(2.0, 8.0, sR);
+    let heat = smoothstep(4.0, 11.0, sR);
 
     // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
     // This only sets the low-frequency silhouette and opacity.
@@ -317,26 +311,22 @@ fn ign(p: vec2f) -> f32 {
     let ramp = smoothstep(0.1, 0.8, s);
     let fadeEnd = smoothstep(0.0, 0.15, s) * pow(1.0 - smoothstep(6.0, LENGTH * unit, s), 1.5);
 
-    // Envelope: smooth, translucent hot gas with only a little edge breakup.
-    let shellEnv = 1.0 - radEnv + (turb * 0.12 + (fib2.r - 0.5) * 0.1) * ramp;
-    // Nearly transparent at the exit, gaining body as the gas mixes and burns.
-    let envStrength = mix(0.12, 1.0, smoothstep(1.0, 9.0, sR));
-    let densityEnv = smoothstep(0.0, 0.15, shellEnv) * (0.7 + 0.3 * n.g) * fadeEnd * envStrength;
-
-    // Exit capsule: smooth, dense, opaque white — the exhaust is still one
-    // solid supersonic jet here, no fibres yet.
+    // White exit glow: smooth, dense, opaque — the exhaust is still one solid
+    // supersonic jet here, no fibres yet. Shrinks and fades along the tail.
     let capsuleDensity = smoothstep(0.0, 0.25, 1.0 - radCore + turb * 0.04 * ramp) * exitCore * fadeEnd;
 
-    // Core: the fibrous fire. Fibres both erode the shell and poke past it.
-    let shellCore = 1.0 - radCore + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn) + (fib2.r - 0.5) * 0.12) * ramp;
-    var density = smoothstep(0.0, 0.1, shellCore);
+    // The fire: one fibrous body from the lip onward. Fibres both erode the
+    // shell and poke past it; near the exit it is thin and see-through.
+    let shellFire = 1.0 - radEnv + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn) + (fib2.r - 0.5) * 0.12) * ramp;
+    var density = smoothstep(0.0, 0.1, shellFire);
     density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-    density *= fadeEnd;
+    density *= fadeEnd * fireStrength;
 
     // Soot burns in the shear layer of the afterburner where the fuel-rich
     // gas meets air. Absorbing and emitting.
-    let core = 1.0 - radCore * radCore * 0.45;
-    let sootFrac = smoothstep(5.0, 6.5, sR) * (1.0 - smoothstep(9.0, 16.0, sR)) * (0.55 + 0.45 * n.g) * smoothstep(0.35, 0.85, radCore);
+    let core = 1.0 - radEnv * radEnv * 0.45;
+    let glowCore = 1.0 - radCore * radCore * 0.45;
+    let sootFrac = smoothstep(4.0, 6.5, sR) * (1.0 - smoothstep(9.0, 16.0, sR)) * (0.55 + 0.45 * n.g) * smoothstep(0.35, 0.85, radEnv);
     let sootT = 1900.0 + 700.0 * clamp((0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
     let sootRadiance = blackbody(sootT) * plume.sootGain;
 
@@ -350,12 +340,11 @@ fn ign(p: vec2f) -> f32 {
       // The densest, hottest core also radiates thermally (warm white).
       + coreWhite * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
       // Exhaust capsule leaving the nozzle: saturated white-blue, full width.
-      + mix(vec3f(1.0, 0.6, 0.8), vec3f(1.0, 0.98, 1.0), clamp(core, 0.0, 1.0)) * (capsuleDensity * (0.6 + 0.8 * core) * plume.exitGain * 12.0)
-      // The hot-gas envelope glows faintly violet near the exit, pink further
-      // out, brighter around the capsule and along the fibres.
-      + mix(EXIT_GLOW, GAS_GLOW, 0.55) * (densityEnv * (0.6 + 0.4 * hairs) * plume.exitGain * 0.55)
-      // Mach disk: a thin bright re-heated slab in the envelope at the neck.
-      + DIAMOND_GLOW * (densityEnv * machDisk * plume.exitGain * 0.25);
+      + mix(vec3f(1.0, 0.6, 0.8), vec3f(1.0, 0.98, 1.0), clamp(glowCore, 0.0, 1.0)) * (capsuleDensity * (0.6 + 0.8 * glowCore) * plume.exitGain * 12.0)
+      // Near the exit the thin fire glows faintly violet-pink (Swan bands).
+      + mix(EXIT_GLOW, GAS_GLOW, 0.55) * (density * (1.0 - burn) * (0.6 + 0.4 * hairs) * plume.exitGain * 0.8)
+      // Mach disk: a thin bright re-heated slab at the squeeze.
+      + DIAMOND_GLOW * (density * machDisk * plume.exitGain * 0.25);
 
     // Exit region: discrete engine jets read as sharp parallel streaks of
     // blue-violet gas, with the first diamonds glowing warm white.
@@ -366,7 +355,7 @@ fn ign(p: vec2f) -> f32 {
 
     // High absorption in the fire keeps its visible layer thin, so fibres at
     // different depths do not average into mush; the envelope stays thin.
-    let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + capsuleDensity * 6.0 + densityEnv * 1.0 + hazeDensity * 0.35;
+    let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + capsuleDensity * 6.0 + hazeDensity * 0.35;
     let alpha = 1.0 - exp(-sigma * dt);
     color += transmittance * (sootRadiance * sootFrac * alpha + (glow + exitGlow + diamondGlow) * dt);
     haze += transmittance * hazeDensity * dt;
