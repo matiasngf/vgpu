@@ -319,7 +319,9 @@ fn ign(p: vec2f) -> f32 {
 
     // Envelope: smooth, translucent hot gas with only a little edge breakup.
     let shellEnv = 1.0 - radEnv + (turb * 0.12 + (fib2.r - 0.5) * 0.1) * ramp;
-    let densityEnv = smoothstep(0.0, 0.15, shellEnv) * (0.7 + 0.3 * n.g) * fadeEnd;
+    // Nearly transparent at the exit, gaining body as the gas mixes and burns.
+    let envStrength = mix(0.12, 1.0, smoothstep(1.0, 9.0, sR));
+    let densityEnv = smoothstep(0.0, 0.15, shellEnv) * (0.7 + 0.3 * n.g) * fadeEnd * envStrength;
 
     // Exit capsule: smooth, dense, opaque white — the exhaust is still one
     // solid supersonic jet here, no fibres yet.
@@ -358,8 +360,8 @@ fn ign(p: vec2f) -> f32 {
     // Exit region: discrete engine jets read as sharp parallel streaks of
     // blue-violet gas, with the first diamonds glowing warm white.
     let jets = smoothstep(0.5, 0.9, fib2.g * 0.6 + fib3 * 0.5);
-    let hazeDensity = smoothstep(0.0, 0.08, 1.0 - radEnv + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.7 * shock;
-    let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * plume.exitGain;
+    let hazeDensity = smoothstep(0.0, 0.08, 1.0 - radEnv + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.18 * shock;
+    let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * plume.exitGain * 0.5;
     let diamondGlow = DIAMOND_GLOW * diamond * density * burn * 2.5;
 
     // High absorption in the fire keeps its visible layer thin, so fibres at
