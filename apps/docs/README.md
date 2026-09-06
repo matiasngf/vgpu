@@ -28,6 +28,7 @@
 - Readback only supports 8-bit formats, so examples preview HDR targets through a tonemapping pass first (`spaceship-thrusters/debug-preview.wgsl` is a reusable template). `spaceship-thrusters` reports `noise-atlas`, `detail`, `shadow-map`, `scene-color`, `scene-depth`, `fire-hdr`, and `bloom`.
 
 - `node scripts/render-example-sequence.mjs --slug <slug> --frames 8 --dt 0.01667 --out <dir>` renders consecutive animated frames of an example that exports `renderSequence(gpu, target, frames, dt, onFrame)`, one PNG per frame, to inspect temporal techniques (interleaved rendering, history blending) on moving content.
+- `--camera "px,py,pz/tx,ty,tz[/fov]"` on `render-example-intermediates.mjs` overrides the example's camera (examples opt in through `ThrusterThumbOptions.camera`), which is how the plume grid was checked from six angles against the direct march.
 - `node scripts/profile-example.mjs --slug <slug> --size 1280x720 --frames 20` times each pass of an example that exports `profile(gpu, target, frames)` (`spaceship-thrusters` reports scene, fire, bloom and composite). On lavapipe the numbers are CPU rasterization times, only meaningful relative to each other.
 
 ### Gotchas and safeguards

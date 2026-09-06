@@ -6,7 +6,9 @@ import blurWgsl from './blur.wgsl';
 import brightPassWgsl from './bright-pass.wgsl';
 import compositeWgsl from './composite.wgsl';
 import debugPreviewWgsl from './debug-preview.wgsl';
+import fireDirectWgsl from './fire-direct.wgsl';
 import fireWgsl from './fire.wgsl';
+import gridWgsl from './grid.wgsl';
 import resolveWgsl from './resolve.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
@@ -15,10 +17,18 @@ import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEF
 
 type Output = Surface | Target;
 
-export type ThrusterIntermediate = 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'fire-hdr' | 'bloom';
+export type ThrusterIntermediate = 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'plume-grid' | 'fire-hdr' | 'bloom';
+
+export interface ThrusterCamera {
+  position: Vec3;
+  target: Vec3;
+  fovDeg?: number;
+}
 
 export interface ThrusterThumbOptions {
   time?: number;
+  /** Override the camera (headless artifact hunting from other angles). */
+  camera?: ThrusterCamera;
   /** Receives every internal render target so headless runs can inspect the graph. */
   onIntermediateRendered?: (
     kind: ThrusterIntermediate,
@@ -35,6 +45,15 @@ const AXIS_HEIGHT = 1.7;
 const PLUME_AXIS: Vec3 = [1, 0, 0];
 const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.2, glowGain: 10, exitGain: 5 };
 const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
+/** Named camera presets, also reachable from the headless scripts. */
+export const CAMERA_PRESETS: Record<string, ThrusterCamera> = {
+  default: { position: CAMERA.position, target: CAMERA.target, fovDeg: CAMERA.fovDeg },
+  behind: { position: [-14, 4, 2], target: [6, 1.5, 0], fovDeg: 45 },
+  front: { position: [26, 5, 6], target: [0, 1.7, 0], fovDeg: 40 },
+  top: { position: [4, 24, 0.5], target: [4, 0, 0], fovDeg: 45 },
+  closeup: { position: [-1.5, 4.5, 6], target: [2.5, 1.7, 0], fovDeg: 35 },
+  side: { position: [6, 3, 16], target: [6, 1.7, 0], fovDeg: 40 },
+};
 /** Orthographic sun camera covering the stand and the near plume. */
 const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
 // Late dusk: a low, warm sun grazing in from behind the stand as a rim light,
@@ -59,6 +78,7 @@ const PLUME_LIGHT = { length: 32, intensity: 85 };
 interface Effects {
   bakeNoise: Effect;
   bakeDetail: Effect;
+  grid: Effect;
   fire: Effect;
   resolve: Effect;
   brightPass: Effect;
@@ -88,6 +108,8 @@ interface Targets {
   shadow: Target;
   /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), plus depth. */
   scene: Target;
+  /** Plume grid: cone-fitted slice atlas of emission + extinction, refilled every frame. */
+  plumeGrid: Target;
   /** One 2x2 phase of the plume per frame, quarter resolution (fire + aux). */
   march: Target;
   /** Half-resolution plume history (fire + aux), interleaved from `march`. Rebuilt on resize. */
@@ -99,8 +121,17 @@ interface Targets {
 // Must match the constants in thruster-common.wgsl.
 const NOISE_ATLAS_SIZE = (128 + 2) * 8;
 const DETAIL_SIZE = 512;
+/** 16 x 16 slices of (64 + 2 border)². Must match plume-volume.wgsl. */
+const PLUME_GRID_SIZE = (64 + 2) * 16;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const FIRE_SCALE = 0.5; // the plume is soft; the composite upsamples it depth-aware
+/**
+ * 'grid': evaluate the volume once per frame into the plume grid and march
+ *         two fetches per step (cost independent of resolution and steps).
+ * 'direct': evaluate the volume at every march step (cheaper at low
+ *         resolution; see `profile` to compare on your GPU).
+ */
+export const PLUME_MODE: 'grid' | 'direct' = 'grid';
 /** Fresh-sample weight in the temporal resolve (1 = no history blending). */
 const TEMPORAL_BLEND = 0.75;
 /** How much a stale 2x2 phase leans on its block's fresh sample each frame. */
@@ -155,7 +186,7 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbO
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-thumb');
   const time = opts.time ?? 6.2;
   setConstants(effects, targets);
-  setBindings(effects, geometry, targets);
+  setBindings(effects, geometry, targets, opts.camera);
   await prewarm(effects, geometry, targets, target);
   bakeStatic(gpu, effects, geometry, targets);
 
@@ -217,7 +248,7 @@ export async function renderSequence(
 
 export interface ThrusterProfile {
   /** Milliseconds per pass, median over the measured frames (GPU wall clock). */
-  passes: Record<'scene' | 'fire' | 'bloom' | 'composite', number>;
+  passes: Record<'scene' | 'grid' | 'fire' | 'bloom' | 'composite', number>;
   frames: number;
   size: readonly [number, number];
   fireSize: readonly [number, number];
@@ -237,8 +268,9 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
   bakeStatic(gpu, effects, geometry, targets);
   await gpu.gpu.queue.onSubmittedWorkDone();
 
-  const stages: Record<'scene' | 'fire' | 'bloom' | 'composite', (frame: Frame) => void> = {
+  const stages: Record<'scene' | 'grid' | 'fire' | 'bloom' | 'composite', (frame: Frame) => void> = {
     scene: (frame) => frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => { for (const draw of geometry.draws) pass.draw(draw); }),
+    grid: (frame) => { if (PLUME_MODE === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid)); },
     fire: (frame) => {
       frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
       frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
@@ -254,7 +286,7 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
     },
     composite: (frame) => frame.pass({ target, clear: CLEAR }, (pass) => pass.draw(effects.composite)),
   };
-  const samples: Record<string, number[]> = { scene: [], fire: [], bloom: [], composite: [] };
+  const samples: Record<string, number[]> = { scene: [], grid: [], fire: [], bloom: [], composite: [] };
   for (let i = 0; i < frames + 2; i++) {
     setFrame(effects, time + i / 60, i);
     for (const [name, stage] of Object.entries(stages)) {
@@ -266,7 +298,7 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
   }
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
   const result: ThrusterProfile = {
-    passes: { scene: median(samples.scene!), fire: median(samples.fire!), bloom: median(samples.bloom!), composite: median(samples.composite!) },
+    passes: { scene: median(samples.scene!), grid: median(samples.grid!), fire: median(samples.fire!), bloom: median(samples.bloom!), composite: median(samples.composite!) },
     frames,
     size: target.size,
     fireSize: targets.march.size,
@@ -293,6 +325,7 @@ async function dumpIntermediates(
     ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: 1, mode: 2 }],
     ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
     ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
+    ['plume-grid', targets.plumeGrid.color, targets.plumeGrid.size, { exposure: 0.25, mode: 0 }],
     ['fire-hdr', targets.fireHistory.read.color, targets.fireHistory.read.size, { exposure: 1, mode: 0 }],
     ['bloom', targets.bloomA.color, targets.bloomA.size, { exposure: 1, mode: 0 }],
   ] as const;
@@ -311,7 +344,8 @@ function createEffects(gpu: Gpu, label: string): Effects {
   return {
     bakeNoise: gpu.effect(bakeNoiseWgsl, { label: `${label}-bake-noise` }),
     bakeDetail: gpu.effect(bakeDetailWgsl, { label: `${label}-bake-detail` }),
-    fire: gpu.effect(fireWgsl, { label: `${label}-fire` }),
+    grid: gpu.effect(gridWgsl, { label: `${label}-grid` }),
+    fire: gpu.effect(PLUME_MODE === 'grid' ? fireWgsl : fireDirectWgsl, { label: `${label}-fire` }),
     resolve: gpu.effect(resolveWgsl, { label: `${label}-resolve` }),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Each blur pass owns its uniform buffer so the encoded direction/radius stay distinct.
@@ -333,6 +367,7 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
     shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
     scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }], depth: true, label: `${label}-scene` }),
+    plumeGrid: gpu.target({ size: [PLUME_GRID_SIZE, PLUME_GRID_SIZE], format: HDR_FORMAT, label: `${label}-plume-grid` }),
     march: gpu.target({ size: marchSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-march` }),
     fireHistory: createHistory(gpu, full, label),
     bloomA: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-a` }),
@@ -377,14 +412,23 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
 }
 
 function setConstants(effects: Effects, targets: Targets): void {
-  effects.fire.set({
-    params: { time: 0, motion: 1, phase: 0, frame: 0 },
+  const plume = { ...PLUME, axis: PLUME_AXIS };
+  effects.grid.set({
+    params: { time: 0, motion: 1, frame: -1 },
     atlas: targets.noiseAtlas,
     detail: targets.detail,
     atlasSamp: effects.clampSampler,
     detailSamp: effects.repeatSampler,
-    plume: { ...PLUME, axis: PLUME_AXIS },
+    plume,
   });
+  effects.fire.set({
+    params: { time: 0, motion: 1, phase: 0, frame: 0 },
+    detail: targets.detail,
+    detailSamp: effects.repeatSampler,
+    plume,
+  });
+  if (PLUME_MODE === 'grid') effects.fire.set({ plumeGrid: targets.plumeGrid, gridSamp: effects.clampSampler });
+  else effects.fire.set({ atlas: targets.noiseAtlas, atlasSamp: effects.clampSampler });
   effects.resolve.set({ resolve: { phase: 0, blend: TEMPORAL_BLEND, neighbor: TEMPORAL_NEIGHBOR } });
   effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
@@ -394,15 +438,15 @@ function setConstants(effects: Effects, targets: Targets): void {
   effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, grain: 0.02, time: 0, skyColor: [0.05, 0.055, 0.1] } });
 }
 
-function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {
+function setBindings(effects: Effects, geometry: Geometry, targets: Targets, camera: ThrusterCamera = CAMERA_PRESETS.default!): void {
   const [width, height] = targets.scene.size;
-  const view = lookAt(CAMERA.position, CAMERA.target);
-  const projection = perspective((CAMERA.fovDeg * Math.PI) / 180, width / height, CAMERA.near, CAMERA.far);
+  const view = lookAt(camera.position, camera.target);
+  const projection = perspective(((camera.fovDeg ?? CAMERA.fovDeg) * Math.PI) / 180, width / height, CAMERA.near, CAMERA.far);
   const viewProj = multiply(projection, view);
   const sunViewProj = sunCamera();
   for (const draw of geometry.draws) {
     draw.set({
-      camera: { viewProj, position: CAMERA.position, time: 0 },
+      camera: { viewProj, position: camera.position, time: 0 },
       lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, shadowExtent: 2 * SHADOW.halfExtent, sunViewProj },
       plumeLight: { nozzle: PLUME.nozzle, axis: PLUME_AXIS, ...PLUME_LIGHT },
     });
@@ -411,7 +455,7 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets): vo
   const history = targets.fireHistory.read.size;
   effects.fire.set({
     params: { resolution: history, sceneScale: [width / history[0], height / history[1]] },
-    camera: { invViewProj: invert(viewProj), position: CAMERA.position },
+    camera: { invViewProj: invert(viewProj), position: camera.position },
     sceneDepth: targets.scene.colors[1],
   });
   effects.resolve.set({ marchFire: targets.march, marchAux: targets.march.colors[1] });
@@ -452,6 +496,7 @@ function setHistoryReaders(effects: Effects, targets: Targets): void {
 /** Per-frame uniforms: the clock, and which 2x2 phase this frame marches. */
 function setFrame(effects: Effects, time: number, frameIndex: number): void {
   const phase = frameIndex & 3;
+  effects.grid.set({ params: { time, frame: frameIndex } });
   effects.fire.set({ params: { time, phase, frame: frameIndex } });
   effects.resolve.set({ resolve: { phase } });
   effects.composite.set({ composite: { time } });
@@ -462,7 +507,7 @@ async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, o
     effects.bakeNoise.compile(targets.noiseAtlas), effects.bakeDetail.compile(targets.detail),
     ...geometry.draws.map((draw) => draw.compile(targets.scene)),
     ...geometry.shadowDraws.map((draw) => draw.compile(targets.shadow)),
-    effects.fire.compile(targets.march), effects.resolve.compile(targets.fireHistory.write), effects.brightPass.compile(targets.bloomA),
+    effects.grid.compile(targets.plumeGrid), effects.fire.compile(targets.march), effects.resolve.compile(targets.fireHistory.write), effects.brightPass.compile(targets.bloomA),
     effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
     effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
     effects.composite.compile({ colors: [output.format] }),
@@ -481,6 +526,9 @@ function bakeStatic(gpu: Gpu, effects: Effects, geometry: Geometry, targets: Tar
     frame.pass({ target: targets.shadow, clear: [1, 0, 0, 1] }, (pass) => {
       for (const draw of geometry.shadowDraws) pass.draw(draw);
     });
+    // First full fill of the plume grid; per-frame passes then refresh half
+    // of the slices each and preserve the other half.
+    frame.pass({ target: targets.plumeGrid, clear: [0, 0, 0, 0] }, (pass) => pass.draw(effects.grid));
   });
 }
 
@@ -489,8 +537,10 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => {
     for (const draw of geometry.draws) pass.draw(draw);
   });
-  // Plume: march one phase at quarter resolution, interleave it into the
-  // half-resolution history, then everything downstream reads the history.
+  // Plume: evaluate the volume once into the grid, march one phase at quarter
+  // resolution over it, interleave that into the half-resolution history, then
+  // everything downstream reads the history.
+  if (PLUME_MODE === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid));
   frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
   frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
   targets.fireHistory.swap();

@@ -1,8 +1,9 @@
-import { Plume, GRID_SLICES, BOUND_SCALE, plumeFrame, boundRadius, gridTileUv } from "./plume-volume.wgsl";
+import { Plume, BOUND_SCALE, plumeFrame, blackbody, evaluatePlume } from "./plume-volume.wgsl";
 
-// Raymarched exhaust plume over the per-frame plume grid (see grid.wgsl and
-// plume-volume.wgsl for the volume model). Runs one 2x2 phase per frame at
-// quarter resolution; every step is two bilinear fetches of the grid.
+// Direct variant of fire.wgsl: the same interleaved march, but it evaluates
+// the volume model (plume-volume.wgsl) at every step instead of reading the
+// per-frame grid. Cheaper below ~1080p, since the grid must evaluate the
+// whole bounding cone; the grid wins once pixels x steps outgrow its voxels.
 //
 // Reference analysis (crops of a rocket-stage photo, sRGB 8-bit means):
 //   sky            (82, 135, 149)  teal, darker toward the top
@@ -31,10 +32,8 @@ struct Camera {
 @group(0) @binding(2) var<uniform> plume: Plume;
 // Camera distance of the lit geometry, from scene.wgsl (0 = nothing drawn).
 @group(0) @binding(3) var sceneDepth: texture_2d<f32>;
-// The plume grid (emission rgb, extinction a per world unit) and its sampler.
-@group(0) @binding(4) var plumeGrid: texture_2d<f32>;
-@group(0) @binding(5) var gridSamp: sampler;
-// Detail noise, only for the heat-haze wobble.
+@group(0) @binding(4) var atlas: texture_2d<f32>;
+@group(0) @binding(5) var atlasSamp: sampler;
 @group(0) @binding(6) var detail: texture_2d<f32>;
 @group(0) @binding(7) var detailSamp: sampler;
 
@@ -48,29 +47,12 @@ struct FireOut {
   @location(1) aux: vec4f,
 }
 
-const STEPS: i32 = 32;
+const STEPS: i32 = 24;
 
 fn cameraRay(ndc: vec2f) -> vec3f {
   let nearPoint = camera.invViewProj * vec4f(ndc, 0.0, 1.0);
   let farPoint = camera.invViewProj * vec4f(ndc, 1.0, 1.0);
   return normalize(farPoint.xyz / farPoint.w - nearPoint.xyz / nearPoint.w);
-}
-
-/** Trilinear lookup of the plume grid at world point p (zero outside). */
-fn sampleGrid(frame: mat3x3f, p: vec3f) -> vec4f {
-  let rel = p - plume.nozzle;
-  let s = dot(rel, plume.axis);
-  if (s <= 0.0 || s >= plume.length) { return vec4f(0.0); }
-  let q = rel - plume.axis * s;
-  let g = vec2f(dot(q, frame[0]), dot(q, frame[1])) / boundRadius(plume, s);
-  if (max(abs(g.x), abs(g.y)) >= 1.0) { return vec4f(0.0); }
-  let z = s / plume.length * f32(GRID_SLICES) - 0.5;
-  let z0 = clamp(i32(floor(z)), 0, GRID_SLICES - 1);
-  let z1 = min(z0 + 1, GRID_SLICES - 1);
-  let fz = clamp(z - f32(z0), 0.0, 1.0);
-  let a = textureSampleLevel(plumeGrid, gridSamp, gridTileUv(g, z0), 0.0);
-  let b = textureSampleLevel(plumeGrid, gridSamp, gridTileUv(g, z1), 0.0);
-  return mix(a, b, fz);
 }
 
 // Ray interval inside the (widened) bounding cone, clipped to 0 <= s <= LENGTH.
@@ -168,6 +150,9 @@ fn ign(p: vec2f) -> f32 {
   }
 
   let frame = plumeFrame(plume.axis);
+  let coreWhite = blackbody(2900.0);
+  let sootCold = blackbody(1900.0);
+  let sootHot = blackbody(2600.0);
   let dtWorld = (interval.y - interval.x) / f32(STEPS);
   // Per-pixel interleaved-gradient noise advanced by the golden ratio each
   // frame: successive frames land on different sub-steps, so the temporal
@@ -177,7 +162,7 @@ fn ign(p: vec2f) -> f32 {
   var transmittance = 1.0;
 
   for (var i = 0; i < STEPS; i++) {
-    let sample = sampleGrid(frame, origin + dir * t);
+    let sample = evaluatePlume(atlas, atlasSamp, detail, detailSamp, plume, frame, origin + dir * t, time, coreWhite, sootCold, sootHot);
     if (sample.a > 0.0 || dot(sample.rgb, sample.rgb) > 0.0) {
       let alpha = 1.0 - exp(-sample.a * dtWorld);
       color += transmittance * sample.rgb * dtWorld;

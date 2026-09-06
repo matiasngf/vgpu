@@ -5,7 +5,7 @@
 // (readback only supports 8-bit formats).
 //
 //   node scripts/render-example-intermediates.mjs --slug spaceship-thrusters \
-//     --size 640x360 --time 6.2 --out ../../artifacts/thrusters
+//     --size 640x360 --time 6.2 --out ../../artifacts/thrusters [--camera "px,py,pz/tx,ty,tz[/fov]"]
 //
 // Requires a healthy `vgpu doctor` (a software Vulkan driver such as lavapipe
 // is enough).
@@ -31,6 +31,7 @@ try {
   const target = gpu.target({ size: args.size, format: 'rgba8unorm', label: `debug-${args.slug}` });
   await renderThumb(gpu, target, {
     time: args.time,
+    camera: args.camera,
     warmupFrames: args.warmupFrames,
     dt: 1 / 60,
     onIntermediateRendered: async (kind, pixels, size) => {
@@ -78,6 +79,13 @@ async function loadRenderer(slug) {
   return module.renderThumb;
 }
 
+// --camera "px,py,pz/tx,ty,tz[/fov]"
+function parseCamera(text) {
+  const [p, t, fov] = text.split('/');
+  const vec = (v) => v.split(',').map(Number);
+  return { position: vec(p), target: vec(t), fovDeg: fov ? Number(fov) : undefined };
+}
+
 function parseArgs(argv) {
   const parsed = { slug: undefined, size: [640, 360], time: undefined, warmupFrames: 1, out: path.join('..', '..', 'artifacts', 'example-intermediates') };
   for (let i = 0; i < argv.length; i++) {
@@ -88,6 +96,7 @@ function parseArgs(argv) {
     else if (arg === '--time') parsed.time = Number(argv[++i]);
     else if (arg === '--warmup-frames') parsed.warmupFrames = Number(argv[++i]);
     else if (arg === '--out') parsed.out = argv[++i];
+    else if (arg === '--camera') parsed.camera = parseCamera(argv[++i]);
     else throw new Error(`Unknown argument '${arg}'.`);
   }
   if (!parsed.slug) throw new Error('Pass --slug <example>.');
