@@ -1,4 +1,4 @@
-import type { Draw, Effect, Frame, Gpu, Surface, Target } from 'vgpu';
+import type { Draw, Effect, Frame, Gpu, PingPongTargets, Surface, Target } from 'vgpu';
 
 import bakeDetailWgsl from './bake-detail.wgsl';
 import bakeNoiseWgsl from './bake-noise.wgsl';
@@ -7,6 +7,7 @@ import brightPassWgsl from './bright-pass.wgsl';
 import compositeWgsl from './composite.wgsl';
 import debugPreviewWgsl from './debug-preview.wgsl';
 import fireWgsl from './fire.wgsl';
+import resolveWgsl from './resolve.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
 import { invert, lookAt, multiply, orthographic, pack, perspective, type Vec3 } from './cad';
@@ -59,6 +60,7 @@ interface Effects {
   bakeNoise: Effect;
   bakeDetail: Effect;
   fire: Effect;
+  resolve: Effect;
   brightPass: Effect;
   blurH1: Effect;
   blurV1: Effect;
@@ -86,8 +88,10 @@ interface Targets {
   shadow: Target;
   /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), plus depth. */
   scene: Target;
-  /** HDR fire pass, composited over the scene. */
-  fire: Target;
+  /** One 2x2 phase of the plume per frame, quarter resolution (fire + aux). */
+  march: Target;
+  /** Half-resolution plume history (fire + aux), interleaved from `march`. Rebuilt on resize. */
+  fireHistory: PingPongTargets;
   bloomA: Target;
   bloomB: Target;
 }
@@ -97,6 +101,10 @@ const NOISE_ATLAS_SIZE = (128 + 2) * 8;
 const DETAIL_SIZE = 512;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const FIRE_SCALE = 0.5; // the plume is soft; the composite upsamples it depth-aware
+/** Fresh-sample weight in the temporal resolve (1 = no history blending). */
+const TEMPORAL_BLEND = 0.75;
+/** How much a stale 2x2 phase leans on its block's fresh sample each frame. */
+const TEMPORAL_NEIGHBOR = 0.3;
 const BLOOM_HEIGHT = 240;
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 
@@ -117,15 +125,15 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
   // sizes, so handling the initial event is cheap and never misses a resize.
   const unsubscribeResize = surface.onResize(() => {
     if (disposed) return;
-    resizeTargets(targets, surface.size);
+    resizeTargets(gpu, targets, surface.size);
     setBindings(effects, geometry, targets);
   });
   bakeStatic(gpu, effects, geometry, targets);
 
+  let frameIndex = 0;
   const handle = gpu.frame.loop((frame) => {
-    // Only the clock changes per frame; every other binding is stable.
-    effects.fire.set({ params: { time: gpu.time } });
-    effects.composite.set({ composite: { time: gpu.time } });
+    // Only the clock and the temporal phase change per frame.
+    setFrame(effects, gpu.time, frameIndex++);
     renderChain(frame, effects, geometry, targets, surface);
   });
 
@@ -151,9 +159,12 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbO
   await prewarm(effects, geometry, targets, target);
   bakeStatic(gpu, effects, geometry, targets);
 
-  effects.fire.set({ params: { time } });
-  effects.composite.set({ composite: { time } });
-  gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
+  // Four frames at a fixed time fill all four phases of the history, so the
+  // still is a complete, deterministic plume.
+  for (let phase = 0; phase < 4; phase++) {
+    setFrame(effects, time, phase);
+    gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
+  }
   await gpu.gpu.queue.onSubmittedWorkDone();
 
   if (opts.onIntermediateRendered) {
@@ -167,6 +178,41 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbO
 /** Offscreen targets own their textures; release them when the graph is torn down. */
 function destroyTargets(targets: Targets): void {
   for (const target of Object.values(targets)) (target as { destroy?: () => void }).destroy?.();
+  destroyHistory(targets.fireHistory);
+}
+
+function destroyHistory(history: PingPongTargets): void {
+  for (const target of [history.read, history.write]) (target as { destroy?: () => void }).destroy?.();
+}
+
+/**
+ * Renders `frames` consecutive animated frames (dt apart) and hands each one
+ * back, for checking the temporal interleave on moving fire headlessly.
+ */
+export async function renderSequence(
+  gpu: Gpu,
+  target: Target,
+  frames: number,
+  dt: number,
+  onFrame: (index: number, pixels: Uint8Array, size: readonly [number, number]) => void | Promise<void>,
+  startTime = 6.2,
+): Promise<void> {
+  const effects = createEffects(gpu, 'thrusters-sequence');
+  const targets = createTargets(gpu, target.size, 'thrusters-sequence');
+  const geometry = createGeometry(gpu, effects, targets, 'thrusters-sequence');
+  setConstants(effects, targets);
+  setBindings(effects, geometry, targets);
+  await prewarm(effects, geometry, targets, target);
+  bakeStatic(gpu, effects, geometry, targets);
+  for (let i = 0; i < frames; i++) {
+    setFrame(effects, startTime + i * dt, i);
+    gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
+    await gpu.gpu.queue.onSubmittedWorkDone();
+    await onFrame(i, await target.read(), target.size);
+  }
+  await gpu.settled();
+  for (const mesh of geometry.meshes) mesh.destroy();
+  destroyTargets(targets);
 }
 
 export interface ThrusterProfile {
@@ -193,7 +239,12 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
 
   const stages: Record<'scene' | 'fire' | 'bloom' | 'composite', (frame: Frame) => void> = {
     scene: (frame) => frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => { for (const draw of geometry.draws) pass.draw(draw); }),
-    fire: (frame) => frame.pass({ target: targets.fire, clear: CLEAR }, (pass) => pass.draw(effects.fire)),
+    fire: (frame) => {
+      frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
+      frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
+      targets.fireHistory.swap();
+      setHistoryReaders(effects, targets);
+    },
     bloom: (frame) => {
       frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
       frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH1));
@@ -205,9 +256,7 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
   };
   const samples: Record<string, number[]> = { scene: [], fire: [], bloom: [], composite: [] };
   for (let i = 0; i < frames + 2; i++) {
-    const t = time + i / 60;
-    effects.fire.set({ params: { time: t } });
-    effects.composite.set({ composite: { time: t } });
+    setFrame(effects, time + i / 60, i);
     for (const [name, stage] of Object.entries(stages)) {
       const started = performance.now();
       gpu.frame(stage);
@@ -220,7 +269,7 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
     passes: { scene: median(samples.scene!), fire: median(samples.fire!), bloom: median(samples.bloom!), composite: median(samples.composite!) },
     frames,
     size: target.size,
-    fireSize: targets.fire.size,
+    fireSize: targets.march.size,
   };
   for (const mesh of geometry.meshes) mesh.destroy();
   destroyTargets(targets);
@@ -244,7 +293,7 @@ async function dumpIntermediates(
     ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: 1, mode: 2 }],
     ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
     ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
-    ['fire-hdr', targets.fire.color, targets.fire.size, { exposure: 1, mode: 0 }],
+    ['fire-hdr', targets.fireHistory.read.color, targets.fireHistory.read.size, { exposure: 1, mode: 0 }],
     ['bloom', targets.bloomA.color, targets.bloomA.size, { exposure: 1, mode: 0 }],
   ] as const;
   for (const [kind, source, size, params] of jobs) {
@@ -263,6 +312,7 @@ function createEffects(gpu: Gpu, label: string): Effects {
     bakeNoise: gpu.effect(bakeNoiseWgsl, { label: `${label}-bake-noise` }),
     bakeDetail: gpu.effect(bakeDetailWgsl, { label: `${label}-bake-detail` }),
     fire: gpu.effect(fireWgsl, { label: `${label}-fire` }),
+    resolve: gpu.effect(resolveWgsl, { label: `${label}-resolve` }),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Each blur pass owns its uniform buffer so the encoded direction/radius stay distinct.
     blurH1: gpu.effect(blurWgsl, { label: `${label}-blur-h1` }),
@@ -283,7 +333,8 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
     shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
     scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }], depth: true, label: `${label}-scene` }),
-    fire: gpu.target({ size: fireSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-fire` }),
+    march: gpu.target({ size: marchSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-march` }),
+    fireHistory: createHistory(gpu, full, label),
     bloomA: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-a` }),
     bloomB: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-b` }),
   };
@@ -327,13 +378,14 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
 
 function setConstants(effects: Effects, targets: Targets): void {
   effects.fire.set({
-    params: { time: 0, motion: 1 },
+    params: { time: 0, motion: 1, phase: 0, frame: 0 },
     atlas: targets.noiseAtlas,
     detail: targets.detail,
     atlasSamp: effects.clampSampler,
     detailSamp: effects.repeatSampler,
     plume: { ...PLUME, axis: PLUME_AXIS },
   });
+  effects.resolve.set({ resolve: { phase: 0, blend: TEMPORAL_BLEND, neighbor: TEMPORAL_NEIGHBOR } });
   effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
@@ -356,17 +408,20 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets): vo
     });
   }
   for (const draw of geometry.shadowDraws) draw.set({ light: { viewProj: sunViewProj } });
+  const history = targets.fireHistory.read.size;
   effects.fire.set({
-    params: { resolution: targets.fire.size, sceneScale: [width / targets.fire.size[0], height / targets.fire.size[1]] },
+    params: { resolution: history, sceneScale: [width / history[0], height / history[1]] },
     camera: { invViewProj: invert(viewProj), position: CAMERA.position },
     sceneDepth: targets.scene.colors[1],
   });
-  effects.brightPass.set({ fire: targets.fire, scene: targets.scene });
+  effects.resolve.set({ marchFire: targets.march, marchAux: targets.march.colors[1] });
+  effects.brightPass.set({ scene: targets.scene });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
   effects.blurH2.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV2.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
-  effects.composite.set({ fire: targets.fire, fireAux: targets.fire.colors[1], scene: targets.scene, sceneDepth: targets.scene.colors[1], bloom: targets.bloomA });
+  effects.composite.set({ scene: targets.scene, sceneDepth: targets.scene.colors[1], bloom: targets.bloomA });
+  setHistoryReaders(effects, targets);
 }
 
 function sunCamera() {
@@ -381,12 +436,33 @@ function sunCamera() {
   return multiply(orthographic(-e, e, -e, e, SHADOW.distance - 2 * e, SHADOW.distance + 2 * e), lookAt(eye, SHADOW.center));
 }
 
+function createHistory(gpu: Gpu, full: readonly [number, number], label: string): PingPongTargets {
+  const [width, height] = fireSize(full);
+  return gpu.pingPong(width, height, { colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-fire-history` });
+}
+
+/** Rebinds everything that reads the plume history after a ping-pong swap. */
+function setHistoryReaders(effects: Effects, targets: Targets): void {
+  const history = targets.fireHistory;
+  effects.resolve.set({ historyFire: history.read, historyAux: history.read.colors[1] });
+  effects.brightPass.set({ fire: history.read });
+  effects.composite.set({ fire: history.read, fireAux: history.read.colors[1] });
+}
+
+/** Per-frame uniforms: the clock, and which 2x2 phase this frame marches. */
+function setFrame(effects: Effects, time: number, frameIndex: number): void {
+  const phase = frameIndex & 3;
+  effects.fire.set({ params: { time, phase, frame: frameIndex } });
+  effects.resolve.set({ resolve: { phase } });
+  effects.composite.set({ composite: { time } });
+}
+
 async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, output: Output): Promise<void> {
   await Promise.all([
     effects.bakeNoise.compile(targets.noiseAtlas), effects.bakeDetail.compile(targets.detail),
     ...geometry.draws.map((draw) => draw.compile(targets.scene)),
     ...geometry.shadowDraws.map((draw) => draw.compile(targets.shadow)),
-    effects.fire.compile(targets.fire), effects.brightPass.compile(targets.bloomA),
+    effects.fire.compile(targets.march), effects.resolve.compile(targets.fireHistory.write), effects.brightPass.compile(targets.bloomA),
     effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
     effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
     effects.composite.compile({ colors: [output.format] }),
@@ -413,7 +489,12 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => {
     for (const draw of geometry.draws) pass.draw(draw);
   });
-  frame.pass({ target: targets.fire, clear: CLEAR }, (pass) => pass.draw(effects.fire));
+  // Plume: march one phase at quarter resolution, interleave it into the
+  // half-resolution history, then everything downstream reads the history.
+  frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
+  frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
+  targets.fireHistory.swap();
+  setHistoryReaders(effects, targets);
   frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
   frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH1));
   frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV1));
@@ -422,10 +503,13 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(effects.composite));
 }
 
-function resizeTargets(targets: Targets, size: readonly [number, number]): void {
+function resizeTargets(gpu: Gpu, targets: Targets, size: readonly [number, number]): void {
   const full = normalizeSize(size);
   targets.scene.resize(full);
-  targets.fire.resize(fireSize(full));
+  targets.march.resize(marchSize(full));
+  // Ping-pong targets do not resize: rebuild the history at the new size.
+  destroyHistory(targets.fireHistory);
+  targets.fireHistory = createHistory(gpu, full, 'thrusters-live');
   targets.bloomA.resize(bloomSize(full));
   targets.bloomB.resize(bloomSize(full));
 }
@@ -436,6 +520,12 @@ function normalizeSize(size: readonly [number, number]): [number, number] {
 
 function fireSize(size: readonly [number, number]): [number, number] {
   return [Math.max(1, Math.round(size[0] * FIRE_SCALE)), Math.max(1, Math.round(size[1] * FIRE_SCALE))];
+}
+
+/** Quarter of the history: one 2x2 phase per frame. */
+function marchSize(size: readonly [number, number]): [number, number] {
+  const history = fireSize(size);
+  return [Math.max(1, Math.ceil(history[0] / 2)), Math.max(1, Math.ceil(history[1] / 2))];
 }
 
 function bloomSize(size: readonly [number, number]): [number, number] {

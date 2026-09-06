@@ -24,10 +24,12 @@ import { noise3 } from "./thruster-common.wgsl";
 // march to the volume, and the loop exits early once transmittance is spent.
 
 struct Params {
-  resolution: vec2f,
+  resolution: vec2f, // size of the half-resolution history this march feeds
   time: f32,
   motion: f32,
-  sceneScale: vec2f, // scene texels per fire texel
+  sceneScale: vec2f, // scene texels per history texel
+  phase: u32,        // which pixel of the 2x2 pattern this frame marches
+  frame: f32,        // frame counter for the golden-ratio jitter sequence
 }
 
 // Camera: rays are unprojected from NDC with the inverse view-projection.
@@ -71,7 +73,7 @@ struct FireOut {
 @group(0) @binding(4) var detailSamp: sampler;
 
 const PI: f32 = 3.14159265359;
-const STEPS: i32 = 48;
+const STEPS: i32 = 24;
 const BOUND_SCALE: f32 = 1.5;  // march bounds are wider than the nominal cone
 
 fn plumeFrame() -> mat3x3f {
@@ -213,8 +215,11 @@ fn ign(p: vec2f) -> f32 {
 }
 
 @fragment fn fs_main(@builtin(position) position: vec4f) -> FireOut {
+  // This pass renders a quarter-size target: each texel stands for one
+  // history pixel of the current 2x2 phase.
   let res = params.resolution;
-  let ndc = vec2f((position.x / res.x) * 2.0 - 1.0, 1.0 - (position.y / res.y) * 2.0);
+  let historyPixel = floor(position.xy) * 2.0 + vec2f(f32(params.phase & 1u), f32(params.phase >> 1u)) + 0.5;
+  let ndc = vec2f((historyPixel.x / res.x) * 2.0 - 1.0, 1.0 - (historyPixel.y / res.y) * 2.0);
   let dir = cameraRay(ndc);
   let origin = camera.position;
   let AXIS = plume.axis;
@@ -226,7 +231,7 @@ fn ign(p: vec2f) -> f32 {
   // was drawn (the scene target is cleared to 0). The march never continues
   // behind a surface, and the surface shows through the remaining
   // transmittance instead of the sky.
-  let scenePixel = vec2i(position.xy * params.sceneScale);
+  let scenePixel = vec2i(historyPixel * params.sceneScale);
   let surfaceDistance = textureLoad(sceneDepth, scenePixel, 0).r;
   let hasSurface = surfaceDistance > 0.0;
   var interval = coneInterval(origin, dir);
@@ -237,7 +242,7 @@ fn ign(p: vec2f) -> f32 {
   // the axis; a scrolling noise field jitters the background lookup.
   let pathThroughCone = max(interval.y - interval.x, 0.0);
   let heatHaze = smoothstep(0.0, plume.r0 * 3.0, pathThroughCone) * 0.6;
-  let wobble = (textureSampleLevel(detail, detailSamp, position.xy / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze * params.sceneScale;
+  let wobble = (textureSampleLevel(detail, detailSamp, historyPixel / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze * params.sceneScale;
   var out: FireOut;
   out.aux = vec4f(wobble, surfaceDistance, 0.0);
   if (interval.y <= interval.x) {
@@ -252,7 +257,10 @@ fn ign(p: vec2f) -> f32 {
   let sootCold = blackbody(1900.0);
   let sootHot = blackbody(2600.0);
   let dtWorld = (interval.y - interval.x) / f32(STEPS);
-  var t = interval.x + dtWorld * ign(position.xy);
+  // Per-pixel interleaved-gradient noise advanced by the golden ratio each
+  // frame: successive frames land on different sub-steps, so the temporal
+  // history averages them out and 24 steps do not band.
+  var t = interval.x + dtWorld * fract(ign(historyPixel) + 0.6180339887 * params.frame);
   var color = vec3f(0.0);
   var transmittance = 1.0;
   var haze = 0.0; // accumulated near-nozzle gas, used for a heat-shimmer tint
