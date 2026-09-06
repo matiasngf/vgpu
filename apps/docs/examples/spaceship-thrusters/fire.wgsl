@@ -53,16 +53,25 @@ struct Plume {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(5) var<uniform> camera: Camera;
 @group(0) @binding(6) var<uniform> plume: Plume;
-// Lit geometry (scene-linear radiance) and its camera distance, from scene.wgsl.
-@group(0) @binding(7) var sceneColor: texture_2d<f32>;
-@group(0) @binding(8) var sceneDepth: texture_2d<f32>;
+// Camera distance of the lit geometry, from scene.wgsl (0 = nothing drawn).
+@group(0) @binding(7) var sceneDepth: texture_2d<f32>;
+
+// The pass outputs the plume alone, premultiplied: rgb = radiance reaching the
+// camera, a = transmittance left for whatever is behind. The composite adds
+// the full-resolution scene behind it. `aux` carries the heat-haze offset
+// (xy, in scene pixels), the surface distance this ray was clipped to (z, for
+// depth-aware upsampling) and the accumulated exit gas (w, for the sky shimmer).
+struct FireOut {
+  @location(0) fire: vec4f,
+  @location(1) aux: vec4f,
+}
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var detail: texture_2d<f32>;
 @group(0) @binding(3) var atlasSamp: sampler;
 @group(0) @binding(4) var detailSamp: sampler;
 
 const PI: f32 = 3.14159265359;
-const STEPS: i32 = 64;
+const STEPS: i32 = 48;
 const BOUND_SCALE: f32 = 1.5;  // march bounds are wider than the nominal cone
 
 fn plumeFrame() -> mat3x3f {
@@ -203,7 +212,7 @@ fn ign(p: vec2f) -> f32 {
   return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
-@fragment fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
+@fragment fn fs_main(@builtin(position) position: vec4f) -> FireOut {
   let res = params.resolution;
   let ndc = vec2f((position.x / res.x) * 2.0 - 1.0, 1.0 - (position.y / res.y) * 2.0);
   let dir = cameraRay(ndc);
@@ -228,16 +237,20 @@ fn ign(p: vec2f) -> f32 {
   // the axis; a scrolling noise field jitters the background lookup.
   let pathThroughCone = max(interval.y - interval.x, 0.0);
   let heatHaze = smoothstep(0.0, plume.r0 * 3.0, pathThroughCone) * 0.6;
-  let wobble = (textureSampleLevel(detail, detailSamp, position.xy / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze;
-  let hazePixel = clamp(scenePixel + vec2i(wobble * params.sceneScale), vec2i(0), vec2i(textureDimensions(sceneDepth)) - 1);
-  let hazeSurface = textureLoad(sceneDepth, hazePixel, 0).r > 0.0;
-  let background = select(sky(dir), textureLoad(sceneColor, select(scenePixel, hazePixel, hazeSurface), 0).rgb, hasSurface);
+  let wobble = (textureSampleLevel(detail, detailSamp, position.xy / 256.0 + vec2f(time * 0.35, -time * 1.6), 0.0).ba - 0.5) * 14.0 * heatHaze * params.sceneScale;
+  var out: FireOut;
+  out.aux = vec4f(wobble, surfaceDistance, 0.0);
   if (interval.y <= interval.x) {
-    return vec4f(background, 1.0);
+    out.fire = vec4f(0.0, 0.0, 0.0, 1.0);
+    return out;
   }
 
   let frame = plumeFrame();
   let coreWhite = blackbody(2900.0);
+  // Soot spans 1900-2600 K; interpolating two blackbody colours per step is
+  // indistinguishable from evaluating the fit and skips its pow/divisions.
+  let sootCold = blackbody(1900.0);
+  let sootHot = blackbody(2600.0);
   let dtWorld = (interval.y - interval.x) / f32(STEPS);
   var t = interval.x + dtWorld * ign(position.xy);
   var color = vec3f(0.0);
@@ -254,6 +267,9 @@ fn ign(p: vec2f) -> f32 {
     let glowWorld = plume.r0 * glowProfile(sR);
     let radEnv = length(q) / fireWorld;   // fire body
     let radCore = length(q) / glowWorld;  // white exit glow
+    // Cheap test first (Nubis-style): the noise can push the shell out by at
+    // most ~0.5 radii, so beyond that no fetch can produce density.
+    if (radEnv > 1.5 && radCore > 1.6) { t += dtWorld; continue; }
     // Everything below is expressed in "plume units" (the look was tuned for
     // an exit radius of 0.3), so the same shader fits any engine size.
     let unit = 0.3 / plume.r0;
@@ -293,12 +309,11 @@ fn ign(p: vec2f) -> f32 {
     let theta = atan2(qy, qx) / (2.0 * PI);
     let fibreUv = vec2f(theta * 7.0 + warp.x * 0.35, (s - radEnv * radius * 0.6) * 0.085 - time * 0.75);
     let fib2 = textureSampleLevel(detail, detailSamp, fibreUv, 0.0);
-    let fib2b = textureSampleLevel(detail, detailSamp, fibreUv * vec2f(2.7, 2.1) + vec2f(0.37, 0.11), 0.0);
-    let fib2c = textureSampleLevel(detail, detailSamp, fibreUv * vec2f(6.1, 4.3) + vec2f(0.71, 0.53), 0.0);
     // Knots: a nearly isotropic lookup along the flow breaks the streaks into
     // segments of varying brightness instead of uniform brush strokes.
     let knots = textureSampleLevel(detail, detailSamp, vec2f(theta * 7.0 + 0.13, s * 0.55 - time * 0.75 + fib2.b * 0.2), 0.0).r;
-    let filament = clamp((fib3 * 0.42 + fib2.g * 0.32 + fib2b.g * 0.26 + fib2c.g * 0.16) * (0.65 + 0.7 * knots), 0.0, 1.0);
+    // fib2.a is the three-octave ridged stack baked into the detail texture.
+    let filament = clamp((fib3 * 0.42 + fib2.a * 0.74) * (0.65 + 0.7 * knots), 0.0, 1.0);
     // Thin, high-contrast hairs: only the ridge tops light up.
     let hairs = smoothstep(0.55, 0.95, filament);
 
@@ -331,8 +346,8 @@ fn ign(p: vec2f) -> f32 {
     let core = 1.0 - radEnv * radEnv * 0.45;
     let glowCore = 1.0 - radCore * radCore * 0.45;
     let sootFrac = smoothstep(4.0, 6.5, sR) * (1.0 - smoothstep(9.0, 16.0, sR)) * (0.55 + 0.45 * n.g) * smoothstep(0.35, 0.85, radEnv);
-    let sootT = 1900.0 + 700.0 * clamp((0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
-    let sootRadiance = blackbody(sootT) * plume.sootGain;
+    let sootHeat = clamp((0.4 + 1.0 * hairs) * (0.7 + 0.5 * heat), 0.0, 1.0);
+    let sootRadiance = mix(sootCold, sootHot, sootHeat) * plume.sootGain;
 
     // Gas glow: optically thin, so it adds along the ray instead of riding on
     // opacity. Fibres and the hot core carry most of it.
@@ -368,10 +383,7 @@ fn ign(p: vec2f) -> f32 {
     t += dtWorld;
   }
 
-  // The near-nozzle gas is mostly transparent: let a slightly cooled, brighter
-  // sky show through it so the exit reads as hot glass rather than smoke.
-  let shimmer = clamp(haze * 1.6, 0.0, 1.0) * select(1.0, 0.0, hasSurface);
-  let seenSky = mix(background, background * vec3f(1.15, 1.2, 1.25) + vec3f(0.03, 0.05, 0.06), shimmer);
-  let result = color + transmittance * seenSky;
-  return vec4f(result, 1.0);
+  out.fire = vec4f(color, transmittance);
+  out.aux.w = clamp(haze * 1.6, 0.0, 1.0);
+  return out;
 }

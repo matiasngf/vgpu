@@ -96,7 +96,7 @@ interface Targets {
 const NOISE_ATLAS_SIZE = (128 + 2) * 8;
 const DETAIL_SIZE = 512;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
-const FIRE_SCALE = 1.0; // TODO: optimization pass once the look is locked
+const FIRE_SCALE = 0.5; // the plume is soft; the composite upsamples it depth-aware
 const BLOOM_HEIGHT = 240;
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 
@@ -169,6 +169,64 @@ function destroyTargets(targets: Targets): void {
   for (const target of Object.values(targets)) (target as { destroy?: () => void }).destroy?.();
 }
 
+export interface ThrusterProfile {
+  /** Milliseconds per pass, median over the measured frames (GPU wall clock). */
+  passes: Record<'scene' | 'fire' | 'bloom' | 'composite', number>;
+  frames: number;
+  size: readonly [number, number];
+  fireSize: readonly [number, number];
+}
+
+/**
+ * Times each pass of the per-frame chain separately (submit + wait), so the
+ * headless harness can compare optimizations. Baking is excluded.
+ */
+export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2): Promise<ThrusterProfile> {
+  const effects = createEffects(gpu, 'thrusters-profile');
+  const targets = createTargets(gpu, target.size, 'thrusters-profile');
+  const geometry = createGeometry(gpu, effects, targets, 'thrusters-profile');
+  setConstants(effects, targets);
+  setBindings(effects, geometry, targets);
+  await prewarm(effects, geometry, targets, target);
+  bakeStatic(gpu, effects, geometry, targets);
+  await gpu.gpu.queue.onSubmittedWorkDone();
+
+  const stages: Record<'scene' | 'fire' | 'bloom' | 'composite', (frame: Frame) => void> = {
+    scene: (frame) => frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => { for (const draw of geometry.draws) pass.draw(draw); }),
+    fire: (frame) => frame.pass({ target: targets.fire, clear: CLEAR }, (pass) => pass.draw(effects.fire)),
+    bloom: (frame) => {
+      frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
+      frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH1));
+      frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV1));
+      frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH2));
+      frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV2));
+    },
+    composite: (frame) => frame.pass({ target, clear: CLEAR }, (pass) => pass.draw(effects.composite)),
+  };
+  const samples: Record<string, number[]> = { scene: [], fire: [], bloom: [], composite: [] };
+  for (let i = 0; i < frames + 2; i++) {
+    const t = time + i / 60;
+    effects.fire.set({ params: { time: t } });
+    effects.composite.set({ composite: { time: t } });
+    for (const [name, stage] of Object.entries(stages)) {
+      const started = performance.now();
+      gpu.frame(stage);
+      await gpu.gpu.queue.onSubmittedWorkDone();
+      if (i >= 2) samples[name]!.push(performance.now() - started); // skip warm-up frames
+    }
+  }
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
+  const result: ThrusterProfile = {
+    passes: { scene: median(samples.scene!), fire: median(samples.fire!), bloom: median(samples.bloom!), composite: median(samples.composite!) },
+    frames,
+    size: target.size,
+    fireSize: targets.fire.size,
+  };
+  for (const mesh of geometry.meshes) mesh.destroy();
+  destroyTargets(targets);
+  return result;
+}
+
 /**
  * Reads every internal target back for headless inspection. 8-bit targets are
  * read directly; HDR and depth targets go through a preview pass first
@@ -225,7 +283,7 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
     shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
     scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }], depth: true, label: `${label}-scene` }),
-    fire: gpu.target({ size: fireSize(full), format: HDR_FORMAT, label: `${label}-fire` }),
+    fire: gpu.target({ size: fireSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-fire` }),
     bloomA: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-a` }),
     bloomB: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-b` }),
   };
@@ -281,7 +339,7 @@ function setConstants(effects: Effects, targets: Targets): void {
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, grain: 0.02, time: 0 } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, grain: 0.02, time: 0, skyColor: [0.05, 0.055, 0.1] } });
 }
 
 function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {
@@ -301,15 +359,14 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets): vo
   effects.fire.set({
     params: { resolution: targets.fire.size, sceneScale: [width / targets.fire.size[0], height / targets.fire.size[1]] },
     camera: { invViewProj: invert(viewProj), position: CAMERA.position },
-    sceneColor: targets.scene,
     sceneDepth: targets.scene.colors[1],
   });
-  effects.brightPass.set({ src: targets.fire });
+  effects.brightPass.set({ fire: targets.fire, scene: targets.scene });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
   effects.blurH2.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV2.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
-  effects.composite.set({ scene: targets.fire, bloom: targets.bloomA });
+  effects.composite.set({ fire: targets.fire, fireAux: targets.fire.colors[1], scene: targets.scene, sceneDepth: targets.scene.colors[1], bloom: targets.bloomA });
 }
 
 function sunCamera() {
