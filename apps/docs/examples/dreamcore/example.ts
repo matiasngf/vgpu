@@ -21,8 +21,10 @@ export interface DreamcoreFrameOptions {
   time?: number;
   /** 1 sample per pixel for live rendering, 4 for stills. */
   samples?: 1 | 4;
-  /** Blade shadow rays toward the door and sun; off for a cheaper live frame. */
+  /** Exact blade shadow rays toward the door and sun; off for a cheaper live frame. */
   grassShadows?: boolean;
+  /** Wind amplitude for the blades (0 for stills). */
+  wind?: number;
 }
 
 interface Effects {
@@ -47,20 +49,16 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
-  /** Eye-level camera; the vertical field of view widens for portrait framings. */
-  camera: { height: 0.95, pitch: 0.02, fovYLandscape: 0.62, fovYPortrait: 0.8 },
-  door: { x: -0.3, z: 4.8, yaw: 0.05, leaf: 1.95 },
-  chair: { x: 1.4, z: 7.5, yaw: 0.5, scale: 1 },
+  /** Elevated camera, matching the reference field photo; same vertical FOV for any aspect. */
+  camera: { height: 5.5, pitch: -0.037, fovY: 0.733 },
+  door: { x: 0, z: 14.5, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
-  doorLight: 9,
-  grass: { radius: 12, height: 0.34 },
+  doorLight: 12,
+  /** Blade patch around the door (radius in metres) and blade height. */
+  grass: { radius: 9, height: 0.22 },
   post: { exposure: 1, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
-
-function fovYFor(size: readonly [number, number]): number {
-  return size[0] >= size[1] ? LOOK.camera.fovYLandscape : LOOK.camera.fovYPortrait;
-}
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
 export const CYCLE_SECONDS = 16;
@@ -103,7 +101,7 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
 
   const handle = gpu.frame.loop((frame) => {
     // Only the two animated values are written each frame; everything else stays as set.
-    setFrame(effects, targets, { phase: phaseAt(gpu.time), time: gpu.time, samples: 1, grassShadows: false });
+    setFrame(effects, { phase: phaseAt(gpu.time), time: gpu.time, samples: 1, grassShadows: false, wind: 1 });
     renderChain(frame, effects, targets, surface);
   });
 
@@ -167,14 +165,13 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
 }
 
 function setConstants(effects: Effects): void {
-  const { camera, door, chair, sun, post, grass } = LOOK;
+  const { camera, door, sun, post, grass } = LOOK;
   effects.scene.set({
     params: {
       time: 0,
       phase: 0,
-      camera: [camera.height, camera.pitch, camera.fovYPortrait, 1],
+      camera: [camera.height, camera.pitch, camera.fovY, 1],
       door: [door.x, door.z, door.yaw, door.leaf],
-      chair: [chair.x, chair.z, chair.yaw, chair.scale],
       look: [sun.azimuth, sun.elevation, LOOK.texture, LOOK.doorLight],
       grass: [grass.radius, grass.height, 1, 0],
     },
@@ -191,13 +188,7 @@ function setConstants(effects: Effects): void {
 }
 
 function setBindings(effects: Effects, targets: Targets): void {
-  const { camera } = LOOK;
-  effects.scene.set({
-    params: {
-      resolution: targets.scene.size,
-      camera: [camera.height, camera.pitch, fovYFor(targets.scene.size), 1],
-    },
-  });
+  effects.scene.set({ params: { resolution: targets.scene.size } });
   effects.brightPass.set({ src: targets.scene });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
@@ -206,15 +197,15 @@ function setBindings(effects: Effects, targets: Targets): void {
   effects.post.set({ scene: targets.scene, bloom: targets.bloomA, post: { resolution: targets.scene.size } });
 }
 
-function setFrame(effects: Effects, targets: Targets, frame: DreamcoreFrameOptions): void {
+function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
   const phase = Math.min(1, Math.max(0, frame.phase));
   const { camera, post, grass } = LOOK;
   effects.scene.set({
     params: {
       time: frame.time ?? 0,
       phase,
-      camera: [camera.height, camera.pitch, fovYFor(targets.scene.size), frame.samples ?? 1],
-      grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, 0],
+      camera: [camera.height, camera.pitch, camera.fovY, frame.samples ?? 1],
+      grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, frame.wind ?? 0],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
@@ -242,7 +233,7 @@ function renderChain(frame: Frame, effects: Effects, targets: Targets, output: O
 }
 
 function renderFrame(gpu: Gpu, effects: Effects, targets: Targets, output: Target, frameOpts: DreamcoreFrameOptions): void {
-  setFrame(effects, targets, frameOpts);
+  setFrame(effects, frameOpts);
   gpu.frame((frame) => renderChain(frame, effects, targets, output));
 }
 
