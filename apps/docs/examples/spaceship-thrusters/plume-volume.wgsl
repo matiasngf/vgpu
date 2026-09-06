@@ -210,7 +210,7 @@ export fn evaluatePlume(
   let shellFire = 1.0 - radEnv + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn + 0.12 * disperse) + (fib2.r - 0.5) * (0.12 + 0.08 * disperse)) * ramp;
   var density = smoothstep(0.0, 0.1 + 0.15 * disperse, shellFire);
   density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-  density *= fadeEnd * fireStrength * mix(1.0, 0.7, disperse);
+  density *= fadeEnd * fireStrength * mix(1.0, 0.85, disperse);
 
   // Soot burns in the shear layer of the afterburner where the fuel-rich
   // gas meets air. Absorbing and emitting.
@@ -228,7 +228,7 @@ export fn evaluatePlume(
   let axial = core * core * core;
   // Emission per unit falls off hard as the gas mixes out: the far plume in
   // the reference is a mid-tone, only the exit region clips the sensor.
-  let spent = mix(1.0, 0.16, disperse);
+  let spent = mix(1.0, 0.3, disperse);
   // The afterburning gas starts out blue-violet just past the neck (the
   // reference's electric-blue jets) and turns magenta as it burns through.
   let gasTint = mix(vec3f(0.45, 0.58, 1.0), GAS_GLOW, smoothstep(3.0, 8.5, sR));
@@ -253,7 +253,7 @@ export fn evaluatePlume(
   // different depths do not average into mush; the envelope stays thin.
   // Mixed-out gas downstream is far less opaque, so the widened plume stays
   // see-through instead of a solid bright body.
-  let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) * mix(1.0, 0.45, disperse) + capsuleDensity * 6.0 + hazeDensity * 0.35;
+  let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) * mix(1.0, 0.65, disperse) + capsuleDensity * 6.0 + hazeDensity * 0.35;
   // Soot rides on opacity in the original integrator; per unit length that is
   // its radiance times the extinction. Convert plume units to world units.
   let emission = sootRadiance * sootFrac * sigma * spent + glow + exitGlow + diamondGlow;
