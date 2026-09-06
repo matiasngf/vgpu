@@ -56,7 +56,7 @@ export const LOOK = {
   texture: 1,
   doorLight: 12,
   /** Blade patch around the door (radius in metres) and blade height. */
-  grass: { radius: 9, height: 0.22 },
+  grass: { radius: 9, height: 0.09 },
   post: { exposure: 1, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 

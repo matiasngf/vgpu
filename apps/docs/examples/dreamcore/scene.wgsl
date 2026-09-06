@@ -30,7 +30,8 @@ const FRAME_T: f32 = 0.085; // frame member width
 const FRAME_D: f32 = 0.07;  // frame half depth
 const LEAF_D: f32 = 0.022;  // leaf half thickness
 const TMAX: f32 = 170.0;
-const CELL: f32 = 0.1;      // grass grid cell (m); every cell grows three blades
+const CELL: f32 = 0.25;     // grass grid cell (m); every cell grows eight combed blades
+const BLADES_PER_CELL: i32 = 8;
 const GRASS_DENSITY: f32 = 5.0; // extinction of the grass layer at ground level (1/m)
 
 // ---------------------------------------------------------------- utils
@@ -305,38 +306,47 @@ fn bezier(a: vec3f, c: vec3f, b: vec3f, t: f32) -> vec3f {
   return a * (s * s) + c * (2.0 * s * t) + b * (t * t);
 }
 
-// Each cell grows three flat blades: a quadratic Bezier spine sampled four times, a
-// tapering width, and a slight lean that stays inside the cell so the grid walk is exact.
+// Comb direction of the flattened grass: a slow flow field with brushed waviness.
+fn combDir(xz: vec2f) -> vec2f {
+  let a = PI * 0.78 + 0.7 * (fbm3(xz * 0.07 + vec2f(3.0, 1.0)) - 0.5) + 0.2 * sin(xz.x * 0.9 + xz.y * 0.4);
+  return vec2f(sin(a), cos(a));
+}
+
+// Each cell grows several combed blades: flat ribbons lying along the comb direction on a
+// low quadratic-Bezier arc. The base sits at the upwind side of the cell and the blade
+// sweeps across it, so every blade stays inside its own cell and the grid walk is exact.
 fn bladeAt(cell: vec2f, k: f32) -> Blade {
   var bl: Blade;
   let s1 = hash12(cell + vec2f(k * 17.3, 0.7));
   let s2 = hash12(cell + vec2f(3.1, k * 29.7 + 5.3));
   let s3 = hash12(cell + vec2f(k * 7.7 + 11.1, 23.9));
   let s4 = hash12(cell + vec2f(41.3, k * 13.1 + 2.2));
-  let base = (cell + vec2f(0.5) + (vec2f(s1, s2) - 0.5) * 0.34) * CELL;
-  var h = params.grass.y * (0.3 + 0.7 * s3 * s3) * grassCoverage(base);
-  let ang = s4 * 6.2831853;
-  let dir = vec2f(cos(ang), sin(ang));
-  // Wind: a slow gust field plus per-blade flutter, bending the tip along the gust.
+  let center = (cell + vec2f(0.5)) * CELL;
+  let dir = combDir(center);
+  let perp = vec2f(-dir.y, dir.x);
+  let base = center - dir * (0.5 * CELL - 0.03) + perp * ((s1 - 0.5) * (CELL - 0.06)) + dir * (s2 * 0.02);
+  let cover = grassCoverage(base);
+  let len = (0.13 + 0.09 * s3) * cover;
+  // Wind: the tips brush sideways a little.
   let wind = params.grass.w;
   let t = params.time;
   let gust = fbm3(base * 0.12 - vec2f(t * 0.35, t * 0.12)) - 0.35;
   let flutter = sin(t * 2.1 + s1 * 6.28 + base.x * 1.7) * 0.35;
-  let sway = wind * (gust + flutter) * 0.012;
-  let lean = dir * (0.006 + 0.013 * s2) + vec2f(0.8, 0.45) * sway;
+  let sway = wind * (gust + flutter) * 0.02;
+  let arc = 0.025 + 0.05 * s4;
   let a = vec3f(base.x, 0.0, base.y);
-  let ctrl = a + vec3f(lean.x * 0.3, h * 0.62, lean.y * 0.3);
-  let tip = a + vec3f(lean.x, h * 0.9, lean.y);
+  let ctrl = a + vec3f(dir.x * len * 0.3 + perp.x * sway * 0.5, arc, dir.y * len * 0.3 + perp.y * sway * 0.5);
+  let tip = a + vec3f(dir.x * len + perp.x * sway, 0.008, dir.y * len + perp.y * sway);
   bl.p0 = a;
   bl.p1 = bezier(a, ctrl, tip, 0.34);
   bl.p2 = bezier(a, ctrl, tip, 0.68);
   bl.p3 = tip;
-  bl.side = vec3f(-dir.y, 0.0, dir.x);
-  let w = 0.0024 + 0.0014 * s1;
+  bl.side = vec3f(perp.x, 0.0, perp.y);
+  let w = 0.0028 + 0.0014 * s1;
   bl.w0 = w;
-  bl.w1 = w * 0.82;
-  bl.w2 = w * 0.5;
-  bl.h = h;
+  bl.w1 = w * 0.85;
+  bl.w2 = w * 0.55;
+  bl.h = len;
   bl.seed = s3 * 0.6 + s4 * 0.4;
   return bl;
 }
@@ -458,7 +468,7 @@ fn traceBlades(ro: vec3f, rd: vec3f, tMin: f32, tMax: f32, maxCells: i32) -> Bla
   var bestHit = vec4f(0.0);
   for (var i = 0; i < maxCells; i++) {
     let tExit = min(tNext.x, tNext.y);
-    for (var k = 0; k < 3; k++) {
+    for (var k = 0; k < BLADES_PER_CELL; k++) {
       let bl = bladeAt(cell, f32(k));
       if (bl.h > 0.004) {
         let hit = testBlade(ro, rd, bl, best);
@@ -782,7 +792,22 @@ fn grassTexture(p: vec3f, footprint: f32) -> Grass {
     tufts = (fbm3(p.xz * fTuft + vec2f(5.0, 2.0)) - 0.5) * tuftFade;
   }
   let patches = fbm3(p.xz * 0.35 + vec2f(11.0, 3.0)) - 0.5;
-  g.albedoMod = 1.0 + strength * (blades * 0.85 + clumps * 0.32 + tufts * 0.26 + patches * 0.18);
+  // Brushed streaks along the prevailing comb direction, gently waved by a warp so they read
+  // as flattened grass rather than wood grain.
+  let a0 = PI * 0.78;
+  let dir = vec2f(sin(a0), cos(a0));
+  let warp = 0.25 * (fbm3(p.xz * 0.22 + vec2f(2.0, 6.0)) - 0.5);
+  let along = dot(p.xz, dir);
+  let across = dot(p.xz, vec2f(-dir.y, dir.x)) + warp;
+  let fStreak = 24.0;
+  let streakFade = 1.0 - smoothstep(0.3, 1.3, footprint * fStreak);
+  var streaks = 0.0;
+  if (streakFade > 0.001) {
+    streaks = (vnoise(vec2f(along * fStreak * 0.28, across * fStreak)) - 0.5) * 0.9
+            + (vnoise(vec2f(along * fStreak * 0.5 + 7.0, across * fStreak * 2.1)) - 0.5) * 0.5;
+    streaks *= streakFade;
+  }
+  g.albedoMod = 1.0 + strength * (blades * 0.5 + streaks * 0.4 + clumps * 0.3 + tufts * 0.24 + patches * 0.18);
   g.warm = max(blades, 0.0) * 0.7 + smoothstep(0.6, 0.9, vnoise(p.xz * 45.0)) * bladeFade * 0.4;
   return g;
 }
@@ -845,8 +870,8 @@ fn shadeBlade(p: vec3f, hit: BladeHit, rd: vec3f, f: DoorFrame, dayMix: f32, rim
   var n = hit.n;
   let v = -rd;
   if (dot(n, v) < 0.0) { n = -n; }
-  // Height ambient occlusion: the blade volume is darkest at the ground.
-  let ao = mix(0.3, 1.0, smoothstep(0.0, 1.0, hit.up));
+  // Height ambient occlusion: the combed layer is thin, so only the ground contact darkens.
+  let ao = mix(0.55, 1.0, clamp(p.y / max(params.grass.y, 0.01), 0.0, 1.0));
   let sun = sunDir();
   let sunCol = sunColor();
   let ndl = dot(n, sun);
