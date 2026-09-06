@@ -1,6 +1,8 @@
 // Lit geometry pass for the engine, test stand and pad. Writes scene-linear
-// radiance to @location(0) and camera distance to @location(1) so the plume
-// raymarch can stop at surfaces and composite over the scene.
+// radiance to @location(0), camera distance to @location(1) so the plume
+// raymarch can stop at surfaces and composite over the scene, and the world
+// normal plus the "occludable" share of the radiance to @location(2) for the
+// screen-space ambient occlusion pass of the social pipeline.
 
 struct Camera {
   viewProj: mat4x4f,
@@ -61,6 +63,9 @@ struct VertexOut {
 struct FragOut {
   @location(0) color: vec4f,
   @location(1) depth: vec4f,
+  // xyz: world normal * 0.5 + 0.5; w: share of the radiance that ambient
+  // occlusion is allowed to darken (ambient fully, the wide local lights partly).
+  @location(2) aux: vec4f,
 }
 
 @vertex fn vs_main(in: VertexIn) -> VertexOut {
@@ -145,6 +150,10 @@ fn sunVisibility(world: vec3f, n: vec3f) -> f32 {
   return mix(mix(taps[0], taps[1], f.x), mix(taps[2], taps[3], f.x), f.y);
 }
 
+fn luminance(c: vec3f) -> f32 {
+  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
+
 fn fresnelSchlick(cosTheta: f32, f0: vec3f) -> vec3f {
   return f0 + (vec3f(1.0) - f0) * pow(1.0 - cosTheta, 5.0);
 }
@@ -181,12 +190,18 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   let m = materialFor(in.material, in.world);
 
   var color = shade(n, v, lighting.sunDir, lighting.sunColor * lighting.sunIntensity, m) * sunVisibility(in.world, n);
+  // Radiance that screen-space occlusion may darken: the hemisphere ambient
+  // fully, and the plume and work light partly (both are wide sources whose
+  // light also comes from the sides, so creases receive less of them).
+  var occludable = vec3f(0.0);
 
   // Hemisphere ambient: sky from above, warm bounce from the pad below.
   let up = n.y * 0.5 + 0.5;
   let f0 = mix(vec3f(0.04), m.albedo, m.metallic);
   let ambientSpec = fresnelSchlick(max(dot(n, v), 0.0), f0) * (1.0 - m.roughness) * 0.5;
-  color += mix(lighting.groundColor, lighting.skyColor, up) * lighting.ambient * (m.albedo * (1.0 - m.metallic) + ambientSpec);
+  let ambient = mix(lighting.groundColor, lighting.skyColor, up) * lighting.ambient * (m.albedo * (1.0 - m.metallic) + ambientSpec);
+  color += ambient;
+  occludable += ambient;
 
   // Plume glow: closest point on the exhaust segment, colour following the
   // exhaust (blue-white at the exit, pink downstream), intensity peaking in
@@ -199,7 +214,9 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     let l = toLight * inverseSqrt(dist2);
     let profile = 0.15 + smoothstep(0.0, 6.0, s) * (1.0 - smoothstep(18.0, 32.0, s));
     let tint = mix(vec3f(0.75, 0.8, 1.0), vec3f(1.0, 0.55, 0.42), smoothstep(1.0, 8.0, s));
-    color += shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
+    let glow = shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
+    color += glow;
+    occludable += glow * 0.45;
   }
 
   // Work light: a warm floodlight on a pole; simple inverse-square point light.
@@ -207,7 +224,9 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     let toLight = lighting.workLight.xyz - in.world;
     let dist2 = max(dot(toLight, toLight), 0.5);
     let l = toLight * inverseSqrt(dist2);
-    color += shade(n, v, l, lighting.workLightColor * (lighting.workLight.w / dist2), m);
+    let flood = shade(n, v, l, lighting.workLightColor * (lighting.workLight.w / dist2), m);
+    color += flood;
+    occludable += flood * 0.3;
   }
   // The lamp face itself glows.
   if (in.material == 8u) { color += vec3f(1.0, 0.9, 0.75) * 6.0; }
@@ -215,10 +234,12 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   // Dusk haze: distant ground fades toward the sky colour.
   let viewDistance = distance(camera.position, in.world);
   let fog = 1.0 - exp(-viewDistance * lighting.fogDensity);
+  let occludableShare = luminance(occludable) * (1.0 - fog) / max(luminance(color), 1e-4);
   color = mix(color, lighting.fogColor, fog);
 
   var out: FragOut;
   out.color = vec4f(color, 1.0);
   out.depth = vec4f(viewDistance, 0.0, 0.0, 1.0);
+  out.aux = vec4f(n * 0.5 + 0.5, clamp(occludableShare, 0.0, 1.0));
   return out;
 }

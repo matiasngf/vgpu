@@ -238,8 +238,12 @@ function decalOne(p: EngineParams): CadMesh {
     for (const [y, sz] of [[yA, -1], [yA, 1], [yB, 1], [yB, -1]] as const) {
       const rr = rAt(y);
       const phi = angle + (sz * halfW + shift) / rr;
+      // Normal of the surface of revolution, including the bell's flare, so the
+      // decal shades (and screen-space occludes) exactly like the bell under it.
+      const slope = (rAt(y + 0.01) - rAt(y - 0.01)) / 0.02;
+      const len = Math.hypot(1, slope);
       mesh.positions.push(rr * Math.cos(phi), y, rr * Math.sin(phi));
-      mesh.normals.push(Math.cos(phi), 0, Math.sin(phi));
+      mesh.normals.push(Math.cos(phi) / len, -slope / len, Math.sin(phi) / len);
       mesh.uvs.push(0, 0);
       mesh.materials.push(MAT_DECAL);
     }

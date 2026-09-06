@@ -1,7 +1,7 @@
 // Headless per-pass profiler: bundles an example that exports `profile(gpu,
 // target, frames)` and prints median milliseconds per pass.
 //
-//   node scripts/profile-example.mjs --slug spaceship-thrusters --size 1280x720 --frames 20
+//   node scripts/profile-example.mjs --slug spaceship-thrusters --size 1280x720 --frames 20 [--quality social]
 //
 // Numbers from a software Vulkan driver (lavapipe) are CPU rasterization
 // times; they are only meaningful relative to each other.
@@ -21,9 +21,10 @@ const profile = await loadProfile(args.slug);
 const gpu = await init();
 try {
   const target = gpu.target({ size: args.size, format: 'rgba8unorm', label: `profile-${args.slug}` });
-  const result = await profile(gpu, target, args.frames);
+  const result = await profile(gpu, target, args.frames, undefined, args.quality);
   const total = Object.values(result.passes).reduce((sum, ms) => sum + ms, 0);
-  console.log(`${args.slug} @ ${result.size[0]}x${result.size[1]} (fire ${result.fireSize[0]}x${result.fireSize[1]}), median of ${result.frames} frames:`);
+  const quality = result.quality ? ` [${result.quality}]` : '';
+  console.log(`${args.slug}${quality} @ ${result.size[0]}x${result.size[1]} (fire ${result.fireSize[0]}x${result.fireSize[1]}), median of ${result.frames} frames:`);
   for (const [name, ms] of Object.entries(result.passes)) console.log(`  ${name.padEnd(10)} ${ms.toFixed(2).padStart(8)} ms  ${(100 * ms / total).toFixed(0).padStart(3)}%`);
   console.log(`  ${'total'.padEnd(10)} ${total.toFixed(2).padStart(8)} ms`);
 } finally {
@@ -60,6 +61,7 @@ function parseArgs(argv) {
     else if (arg === '--slug') parsed.slug = argv[++i];
     else if (arg === '--size') parsed.size = argv[++i].split('x').map(Number);
     else if (arg === '--frames') parsed.frames = Number(argv[++i]);
+    else if (arg === '--quality') parsed.quality = argv[++i];
     else throw new Error(`Unknown argument '${arg}'.`);
   }
   if (!parsed.slug) throw new Error('Pass --slug <example>.');

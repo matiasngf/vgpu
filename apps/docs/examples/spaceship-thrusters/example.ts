@@ -1,5 +1,8 @@
 import type { Draw, Effect, Frame, Gpu, PingPongTargets, Surface, Target } from 'vgpu';
 
+import aoApplyWgsl from './ao-apply.wgsl';
+import aoBlurWgsl from './ao-blur.wgsl';
+import aoWgsl from './ao.wgsl';
 import bakeDetailWgsl from './bake-detail.wgsl';
 import bakeNoiseWgsl from './bake-noise.wgsl';
 import blurWgsl from './blur.wgsl';
@@ -9,6 +12,7 @@ import debugPreviewWgsl from './debug-preview.wgsl';
 import fireDirectWgsl from './fire-direct.wgsl';
 import fireWgsl from './fire.wgsl';
 import gridWgsl from './grid.wgsl';
+import postWgsl from './post.wgsl';
 import resolveWgsl from './resolve.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
@@ -17,7 +21,19 @@ import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEF
 
 type Output = Surface | Target;
 
-export type ThrusterIntermediate = 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'plume-grid' | 'fire-hdr' | 'bloom';
+export type ThrusterIntermediate =
+  | 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'scene-normal' | 'plume-grid' | 'fire-hdr' | 'bloom'
+  | 'ao' | 'scene-lit' | 'composite';
+
+/**
+ * 'fast': the interactive pipeline (what the docs page runs).
+ * 'social': the same graph plus screen-space ambient occlusion on the
+ *           geometry, a higher-resolution bloom chain and a final lens pass
+ *           (edge softness, vignette, photographic grain) for renders meant
+ *           to be posted rather than played. The plume itself is untouched.
+ */
+export type ThrusterQuality = 'fast' | 'social';
+export const RENDER_QUALITY: ThrusterQuality = 'fast';
 
 export interface ThrusterCamera {
   position: Vec3;
@@ -27,6 +43,8 @@ export interface ThrusterCamera {
 
 export interface ThrusterThumbOptions {
   time?: number;
+  /** Pipeline variant; defaults to `RENDER_QUALITY`. */
+  quality?: ThrusterQuality;
   /** Override the camera (headless artifact hunting from other angles). */
   camera?: ThrusterCamera;
   /** Receives every internal render target so headless runs can inspect the graph. */
@@ -76,6 +94,7 @@ const LIGHTING = {
 const PLUME_LIGHT = { length: 32, intensity: 85 };
 
 interface Effects {
+  quality: ThrusterQuality;
   bakeNoise: Effect;
   bakeDetail: Effect;
   grid: Effect;
@@ -87,6 +106,11 @@ interface Effects {
   blurH2: Effect;
   blurV2: Effect;
   composite: Effect;
+  /** Social pipeline only. */
+  ao?: Effect;
+  aoBlur?: Effect;
+  aoApply?: Effect;
+  post?: Effect;
   clampSampler: GPUSampler;
   repeatSampler: GPUSampler;
 }
@@ -106,8 +130,13 @@ interface Targets {
   detail: Target;
   /** Sun shadow map: light-space depth in r32float. */
   shadow: Target;
-  /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), plus depth. */
+  /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), normal + occludable share in colors[2], plus depth. */
   scene: Target;
+  /** Social pipeline only: raw and half-blurred occlusion, the occluded scene, and the composite before the lens pass. */
+  ao?: Target;
+  aoBlur?: Target;
+  sceneLit?: Target;
+  ldr?: Target;
   /** Plume grid: cone-fitted slice atlas of emission + extinction, refilled every frame. */
   plumeGrid: Target;
   /** One 2x2 phase of the plume per frame, quarter resolution (fire + aux). */
@@ -136,15 +165,32 @@ export const PLUME_MODE: 'grid' | 'direct' = 'grid';
 const TEMPORAL_BLEND = 0.75;
 /** How much a stale 2x2 phase leans on its block's fresh sample each frame. */
 const TEMPORAL_NEIGHBOR = 0.3;
-const BLOOM_HEIGHT = 240;
+/** Per-variant knobs. Everything not listed here is shared between the two pipelines. */
+const QUALITY: Record<ThrusterQuality, {
+  bloomHeight: number;
+  /** Screen-space ambient occlusion on the geometry (world-space radius in nozzle radii). */
+  ao: { radius: number; intensity: number; bias: number } | null;
+  /** Final lens pass; null renders the composite straight to the output. */
+  post: { grain: number; vignette: number; edgeBlur: number; edgeStart: number } | null;
+  /** Composite-side vignette and grain (the social variant moves both to the post pass). */
+  composite: { vignette: number; grain: number };
+}> = {
+  fast: { bloomHeight: 240, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
+  social: {
+    bloomHeight: 480,
+    ao: { radius: 1.4, intensity: 3.0, bias: 0.1 },
+    post: { grain: 0.045, vignette: 0.3, edgeBlur: 0.009, edgeStart: 0.5 },
+    composite: { vignette: 0, grain: 0 },
+  },
+};
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 
 export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
   const { init } = await import('vgpu');
   const gpu = await init();
   const surface = gpu.surface(canvas, { dpr: [1, 1.5] });
-  const effects = createEffects(gpu, 'thrusters-live');
-  const targets = createTargets(gpu, surface.size, 'thrusters-live');
+  const effects = createEffects(gpu, 'thrusters-live', RENDER_QUALITY);
+  const targets = createTargets(gpu, surface.size, 'thrusters-live', RENDER_QUALITY);
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-live');
   let disposed = false;
 
@@ -181,8 +227,9 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
 }
 
 export async function renderThumb(gpu: Gpu, target: Target, opts: ThrusterThumbOptions = {}): Promise<void> {
-  const effects = createEffects(gpu, 'thrusters-thumb');
-  const targets = createTargets(gpu, target.size, 'thrusters-thumb');
+  const quality = opts.quality ?? RENDER_QUALITY;
+  const effects = createEffects(gpu, 'thrusters-thumb', quality);
+  const targets = createTargets(gpu, target.size, 'thrusters-thumb', quality);
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-thumb');
   const time = opts.time ?? 6.2;
   setConstants(effects, targets);
@@ -227,9 +274,10 @@ export async function renderSequence(
   dt: number,
   onFrame: (index: number, pixels: Uint8Array, size: readonly [number, number]) => void | Promise<void>,
   startTime = 6.2,
+  quality: ThrusterQuality = RENDER_QUALITY,
 ): Promise<void> {
-  const effects = createEffects(gpu, 'thrusters-sequence');
-  const targets = createTargets(gpu, target.size, 'thrusters-sequence');
+  const effects = createEffects(gpu, 'thrusters-sequence', quality);
+  const targets = createTargets(gpu, target.size, 'thrusters-sequence', quality);
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-sequence');
   setConstants(effects, targets);
   setBindings(effects, geometry, targets);
@@ -248,7 +296,8 @@ export async function renderSequence(
 
 export interface ThrusterProfile {
   /** Milliseconds per pass, median over the measured frames (GPU wall clock). */
-  passes: Record<'scene' | 'grid' | 'fire' | 'bloom' | 'composite', number>;
+  passes: Record<ProfileStage, number>;
+  quality: ThrusterQuality;
   frames: number;
   size: readonly [number, number];
   fireSize: readonly [number, number];
@@ -258,9 +307,11 @@ export interface ThrusterProfile {
  * Times each pass of the per-frame chain separately (submit + wait), so the
  * headless harness can compare optimizations. Baking is excluded.
  */
-export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2): Promise<ThrusterProfile> {
-  const effects = createEffects(gpu, 'thrusters-profile');
-  const targets = createTargets(gpu, target.size, 'thrusters-profile');
+type ProfileStage = 'scene' | 'ao' | 'grid' | 'fire' | 'bloom' | 'composite' | 'post';
+
+export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2, quality: ThrusterQuality = RENDER_QUALITY): Promise<ThrusterProfile> {
+  const effects = createEffects(gpu, 'thrusters-profile', quality);
+  const targets = createTargets(gpu, target.size, 'thrusters-profile', quality);
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-profile');
   setConstants(effects, targets);
   setBindings(effects, geometry, targets);
@@ -268,8 +319,9 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
   bakeStatic(gpu, effects, geometry, targets);
   await gpu.gpu.queue.onSubmittedWorkDone();
 
-  const stages: Record<'scene' | 'grid' | 'fire' | 'bloom' | 'composite', (frame: Frame) => void> = {
+  const stages: Record<ProfileStage, (frame: Frame) => void> = {
     scene: (frame) => frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => { for (const draw of geometry.draws) pass.draw(draw); }),
+    ao: (frame) => renderOcclusion(frame, effects, targets),
     grid: (frame) => { if (PLUME_MODE === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid)); },
     fire: (frame) => {
       frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
@@ -284,21 +336,23 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2)
       frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH2));
       frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV2));
     },
-    composite: (frame) => frame.pass({ target, clear: CLEAR }, (pass) => pass.draw(effects.composite)),
+    composite: (frame) => frame.pass({ target: targets.ldr ?? target, clear: CLEAR }, (pass) => pass.draw(effects.composite)),
+    post: (frame) => { const post = effects.post; if (post) frame.pass({ target, clear: CLEAR }, (pass) => pass.draw(post)); },
   };
-  const samples: Record<string, number[]> = { scene: [], grid: [], fire: [], bloom: [], composite: [] };
+  const samples = Object.fromEntries(Object.keys(stages).map((name) => [name, [] as number[]])) as Record<ProfileStage, number[]>;
   for (let i = 0; i < frames + 2; i++) {
     setFrame(effects, time + i / 60, i);
     for (const [name, stage] of Object.entries(stages)) {
       const started = performance.now();
       gpu.frame(stage);
       await gpu.gpu.queue.onSubmittedWorkDone();
-      if (i >= 2) samples[name]!.push(performance.now() - started); // skip warm-up frames
+      if (i >= 2) samples[name as ProfileStage].push(performance.now() - started); // skip warm-up frames
     }
   }
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
   const result: ThrusterProfile = {
-    passes: { scene: median(samples.scene!), grid: median(samples.grid!), fire: median(samples.fire!), bloom: median(samples.bloom!), composite: median(samples.composite!) },
+    passes: Object.fromEntries(Object.entries(samples).map(([name, values]) => [name, median(values)])) as Record<ProfileStage, number>,
+    quality,
     frames,
     size: target.size,
     fireSize: targets.march.size,
@@ -321,14 +375,19 @@ async function dumpIntermediates(
   await report('noise-atlas', await targets.noiseAtlas.read(), targets.noiseAtlas.size);
   await report('detail', await targets.detail.read(), targets.detail.size);
   const preview = gpu.effect(debugPreviewWgsl, { label: 'thrusters-debug-preview' });
-  const jobs = [
+  type Job = [ThrusterIntermediate, Target['color'], readonly [number, number], { exposure: number; mode: number }];
+  const jobs: Job[] = [
     ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: 1, mode: 2 }],
     ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
     ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
+    ['scene-normal', targets.scene.colors[2], targets.scene.size, { exposure: 1, mode: 1 }],
     ['plume-grid', targets.plumeGrid.color, targets.plumeGrid.size, { exposure: 0.25, mode: 0 }],
     ['fire-hdr', targets.fireHistory.read.color, targets.fireHistory.read.size, { exposure: 1, mode: 0 }],
     ['bloom', targets.bloomA.color, targets.bloomA.size, { exposure: 1, mode: 0 }],
-  ] as const;
+  ];
+  if (targets.ao) jobs.push(['ao', targets.ao.color, targets.ao.size, { exposure: 1, mode: 2 }]);
+  if (targets.sceneLit) jobs.push(['scene-lit', targets.sceneLit.color, targets.sceneLit.size, { exposure: 1, mode: 0 }]);
+  if (targets.ldr) await report('composite', await targets.ldr.read(), targets.ldr.size);
   for (const [kind, source, size, params] of jobs) {
     const previewTarget = gpu.target({ size, format: 'rgba8unorm', label: `thrusters-preview-${kind}` });
     preview.set({ src: source, preview: params });
@@ -340,8 +399,10 @@ async function dumpIntermediates(
   }
 }
 
-function createEffects(gpu: Gpu, label: string): Effects {
+function createEffects(gpu: Gpu, label: string, quality: ThrusterQuality): Effects {
+  const variant = QUALITY[quality];
   return {
+    quality,
     bakeNoise: gpu.effect(bakeNoiseWgsl, { label: `${label}-bake-noise` }),
     bakeDetail: gpu.effect(bakeDetailWgsl, { label: `${label}-bake-detail` }),
     grid: gpu.effect(gridWgsl, { label: `${label}-grid` }),
@@ -354,24 +415,38 @@ function createEffects(gpu: Gpu, label: string): Effects {
     blurH2: gpu.effect(blurWgsl, { label: `${label}-blur-h2` }),
     blurV2: gpu.effect(blurWgsl, { label: `${label}-blur-v2` }),
     composite: gpu.effect(compositeWgsl, { label: `${label}-composite` }),
+    ...(variant.ao ? {
+      ao: gpu.effect(aoWgsl, { label: `${label}-ao` }),
+      aoBlur: gpu.effect(aoBlurWgsl, { label: `${label}-ao-blur` }),
+      aoApply: gpu.effect(aoApplyWgsl, { label: `${label}-ao-apply` }),
+    } : {}),
+    ...(variant.post ? { post: gpu.effect(postWgsl, { label: `${label}-post` }) } : {}),
     // The atlas must clamp: tiles carry their own periodic border.
     clampSampler: gpu.sampler({ minFilter: 'linear', magFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' }),
     repeatSampler: gpu.sampler({ minFilter: 'linear', magFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
   };
 }
 
-function createTargets(gpu: Gpu, size: readonly [number, number], label: string): Targets {
+function createTargets(gpu: Gpu, size: readonly [number, number], label: string, quality: ThrusterQuality): Targets {
   const full = normalizeSize(size);
+  const variant = QUALITY[quality];
+  const bloom = bloomSize(full, variant.bloomHeight);
   return {
     noiseAtlas: gpu.target({ size: [NOISE_ATLAS_SIZE, NOISE_ATLAS_SIZE], format: 'rgba8unorm', label: `${label}-noise-atlas` }),
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
     shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
-    scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }], depth: true, label: `${label}-scene` }),
+    scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }, { format: 'rgba8unorm' }], depth: true, label: `${label}-scene` }),
+    ...(variant.ao ? {
+      ao: gpu.target({ size: full, format: 'r8unorm', label: `${label}-ao` }),
+      aoBlur: gpu.target({ size: full, format: 'r8unorm', label: `${label}-ao-blur` }),
+      sceneLit: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene-lit` }),
+    } : {}),
+    ...(variant.post ? { ldr: gpu.target({ size: full, format: 'rgba8unorm', label: `${label}-ldr` }) } : {}),
     plumeGrid: gpu.target({ size: [PLUME_GRID_SIZE, PLUME_GRID_SIZE], format: HDR_FORMAT, label: `${label}-plume-grid` }),
     march: gpu.target({ size: marchSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-march` }),
     fireHistory: createHistory(gpu, full, label),
-    bloomA: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-a` }),
-    bloomB: gpu.target({ size: bloomSize(full), format: HDR_FORMAT, label: `${label}-bloom-b` }),
+    bloomA: gpu.target({ size: bloom, format: HDR_FORMAT, label: `${label}-bloom-a` }),
+    bloomB: gpu.target({ size: bloom, format: HDR_FORMAT, label: `${label}-bloom-b` }),
   };
 }
 
@@ -435,13 +510,20 @@ function setConstants(effects: Effects, targets: Targets): void {
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, grain: 0.02, time: 0, skyColor: [0.05, 0.055, 0.1] } });
+  const variant = QUALITY[effects.quality];
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, time: 0, skyColor: [0.05, 0.055, 0.1], ...variant.composite } });
+  if (variant.ao) {
+    effects.ao!.set({ ao: variant.ao });
+    effects.aoBlur!.set({ blur: { direction: [1, 0] } });
+  }
+  if (variant.post) effects.post!.set({ samp: effects.clampSampler, post: { time: 0, ...variant.post } });
 }
 
 function setBindings(effects: Effects, geometry: Geometry, targets: Targets, camera: ThrusterCamera = CAMERA_PRESETS.default!): void {
   const [width, height] = targets.scene.size;
+  const fov = ((camera.fovDeg ?? CAMERA.fovDeg) * Math.PI) / 180;
   const view = lookAt(camera.position, camera.target);
-  const projection = perspective(((camera.fovDeg ?? CAMERA.fovDeg) * Math.PI) / 180, width / height, CAMERA.near, CAMERA.far);
+  const projection = perspective(fov, width / height, CAMERA.near, CAMERA.far);
   const viewProj = multiply(projection, view);
   const sunViewProj = sunCamera();
   for (const draw of geometry.draws) {
@@ -459,12 +541,25 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets, cam
     sceneDepth: targets.scene.colors[1],
   });
   effects.resolve.set({ marchFire: targets.march, marchAux: targets.march.colors[1] });
-  effects.brightPass.set({ scene: targets.scene });
+  // With occlusion, everything downstream of the scene reads the occluded copy.
+  const lit = targets.sceneLit ?? targets.scene;
+  if (effects.ao) {
+    effects.ao.set({
+      camera: { invViewProj: invert(viewProj), position: camera.position },
+      ao: { projScale: height / (2 * Math.tan(fov / 2)) },
+      sceneDepth: targets.scene.colors[1],
+      sceneAux: targets.scene.colors[2],
+    });
+    effects.aoBlur!.set({ src: targets.ao!, sceneDepth: targets.scene.colors[1] });
+    effects.aoApply!.set({ src: targets.aoBlur!, sceneDepth: targets.scene.colors[1], scene: targets.scene, sceneAux: targets.scene.colors[2] });
+  }
+  if (effects.post) effects.post.set({ src: targets.ldr! });
+  effects.brightPass.set({ scene: lit });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
   effects.blurH2.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV2.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
-  effects.composite.set({ scene: targets.scene, sceneDepth: targets.scene.colors[1], bloom: targets.bloomA });
+  effects.composite.set({ scene: lit, sceneDepth: targets.scene.colors[1], bloom: targets.bloomA });
   setHistoryReaders(effects, targets);
 }
 
@@ -500,6 +595,7 @@ function setFrame(effects: Effects, time: number, frameIndex: number): void {
   effects.fire.set({ params: { time, phase, frame: frameIndex } });
   effects.resolve.set({ resolve: { phase } });
   effects.composite.set({ composite: { time } });
+  effects.post?.set({ post: { time } });
 }
 
 async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, output: Output): Promise<void> {
@@ -510,7 +606,9 @@ async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, o
     effects.grid.compile(targets.plumeGrid), effects.fire.compile(targets.march), effects.resolve.compile(targets.fireHistory.write), effects.brightPass.compile(targets.bloomA),
     effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
     effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
-    effects.composite.compile({ colors: [output.format] }),
+    effects.composite.compile(targets.ldr ?? { colors: [output.format] }),
+    ...(effects.ao ? [effects.ao.compile(targets.ao!), effects.aoBlur!.compile(targets.aoBlur!), effects.aoApply!.compile(targets.sceneLit!)] : []),
+    ...(effects.post ? [effects.post.compile({ colors: [output.format] })] : []),
   ]);
 }
 
@@ -537,6 +635,7 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => {
     for (const draw of geometry.draws) pass.draw(draw);
   });
+  renderOcclusion(frame, effects, targets);
   // Plume: evaluate the volume once into the grid, march one phase at quarter
   // resolution over it, interleave that into the half-resolution history, then
   // everything downstream reads the history.
@@ -550,18 +649,38 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV1));
   frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH2));
   frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV2));
-  frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(effects.composite));
+  const post = effects.post;
+  if (post) {
+    frame.pass({ target: targets.ldr!, clear: CLEAR }, (pass) => pass.draw(effects.composite));
+    frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(post));
+  } else {
+    frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(effects.composite));
+  }
+}
+
+/**
+ * Social pipeline: screen-space occlusion from the scene's distance and
+ * normal attachments, blurred depth-aware, then multiplied into the lit
+ * scene's occludable share. No-op in the fast pipeline.
+ */
+function renderOcclusion(frame: Frame, effects: Effects, targets: Targets): void {
+  if (!effects.ao) return;
+  frame.pass({ target: targets.ao!, clear: CLEAR }, (pass) => pass.draw(effects.ao!));
+  frame.pass({ target: targets.aoBlur!, clear: CLEAR }, (pass) => pass.draw(effects.aoBlur!));
+  frame.pass({ target: targets.sceneLit!, clear: CLEAR }, (pass) => pass.draw(effects.aoApply!));
 }
 
 function resizeTargets(gpu: Gpu, targets: Targets, size: readonly [number, number]): void {
   const full = normalizeSize(size);
   targets.scene.resize(full);
+  for (const target of [targets.ao, targets.aoBlur, targets.sceneLit, targets.ldr]) target?.resize(full);
   targets.march.resize(marchSize(full));
   // Ping-pong targets do not resize: rebuild the history at the new size.
   destroyHistory(targets.fireHistory);
   targets.fireHistory = createHistory(gpu, full, 'thrusters-live');
-  targets.bloomA.resize(bloomSize(full));
-  targets.bloomB.resize(bloomSize(full));
+  const bloom = bloomSize(full, QUALITY[RENDER_QUALITY].bloomHeight);
+  targets.bloomA.resize(bloom);
+  targets.bloomB.resize(bloom);
 }
 
 function normalizeSize(size: readonly [number, number]): [number, number] {
@@ -578,8 +697,8 @@ function marchSize(size: readonly [number, number]): [number, number] {
   return [Math.max(1, Math.ceil(history[0] / 2)), Math.max(1, Math.ceil(history[1] / 2))];
 }
 
-function bloomSize(size: readonly [number, number]): [number, number] {
-  const height = Math.max(1, Math.min(BLOOM_HEIGHT, size[1]));
+function bloomSize(size: readonly [number, number], bloomHeight: number): [number, number] {
+  const height = Math.max(1, Math.min(bloomHeight, size[1]));
   return [Math.max(1, Math.round(height * size[0] / size[1])), height];
 }
 

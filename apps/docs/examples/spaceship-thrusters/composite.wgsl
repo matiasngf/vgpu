@@ -4,6 +4,7 @@ struct Composite {
   grain: f32,
   time: f32,
   skyColor: vec3f,
+  vignette: f32,   // corner darkening; the social pipeline moves this to post.wgsl
 }
 
 // Depth-aware (bilateral) upsample of the half-resolution plume: the four
@@ -75,7 +76,7 @@ fn hash21(p: vec2f) -> f32 {
 
   let centered = uv - vec2f(0.5);
   let vignette = 1.0 - smoothstep(0.5, 1.2, length(centered) * 1.55);
-  color *= mix(0.72, 1.0, vignette);
+  color *= 1.0 - composite.vignette * (1.0 - vignette);
 
   color = pow(color, vec3f(1.0 / 2.2));
   color += (hash21(uv * 1024.0 + fract(composite.time) * 17.0) - 0.5) * composite.grain;

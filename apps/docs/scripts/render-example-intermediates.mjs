@@ -5,7 +5,7 @@
 // (readback only supports 8-bit formats).
 //
 //   node scripts/render-example-intermediates.mjs --slug spaceship-thrusters \
-//     --size 640x360 --time 6.2 --out ../../artifacts/thrusters [--camera "px,py,pz/tx,ty,tz[/fov]"]
+//     --size 640x360 --time 6.2 --out ../../artifacts/thrusters [--camera "px,py,pz/tx,ty,tz[/fov]"] [--quality social]
 //
 // Requires a healthy `vgpu doctor` (a software Vulkan driver such as lavapipe
 // is enough).
@@ -32,6 +32,7 @@ try {
   await renderThumb(gpu, target, {
     time: args.time,
     camera: args.camera,
+    quality: args.quality,
     warmupFrames: args.warmupFrames,
     dt: 1 / 60,
     onIntermediateRendered: async (kind, pixels, size) => {
@@ -97,6 +98,7 @@ function parseArgs(argv) {
     else if (arg === '--warmup-frames') parsed.warmupFrames = Number(argv[++i]);
     else if (arg === '--out') parsed.out = argv[++i];
     else if (arg === '--camera') parsed.camera = parseCamera(argv[++i]);
+    else if (arg === '--quality') parsed.quality = argv[++i];
     else throw new Error(`Unknown argument '${arg}'.`);
   }
   if (!parsed.slug) throw new Error('Pass --slug <example>.');
