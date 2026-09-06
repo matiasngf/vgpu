@@ -4,6 +4,9 @@ import aoApplyWgsl from './ao-apply.wgsl';
 import aoBlurWgsl from './ao-blur.wgsl';
 import aoWgsl from './ao.wgsl';
 import bakeDetailWgsl from './bake-detail.wgsl';
+import bakeMaterialAtlasWgsl from './bake-material-atlas.wgsl';
+import bakeMaterialFinishWgsl from './bake-material-finish.wgsl';
+import bakeMaterialHeightWgsl from './bake-material-height.wgsl';
 import bakeNoiseWgsl from './bake-noise.wgsl';
 import blurWgsl from './blur.wgsl';
 import brightPassWgsl from './bright-pass.wgsl';
@@ -22,7 +25,8 @@ import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEF
 type Output = Surface | Target;
 
 export type ThrusterIntermediate =
-  | 'noise-atlas' | 'detail' | 'shadow-map' | 'scene-color' | 'scene-depth' | 'scene-normal' | 'plume-grid' | 'fire-hdr' | 'bloom'
+  | 'noise-atlas' | 'detail' | 'concrete' | 'concrete-normal' | 'gravel' | 'gravel-normal'
+  | 'shadow-map' | 'scene-color' | 'scene-depth' | 'scene-normal' | 'plume-grid' | 'fire-hdr' | 'bloom'
   | 'ao' | 'scene-lit' | 'composite';
 
 /**
@@ -97,6 +101,13 @@ interface Effects {
   quality: ThrusterQuality;
   bakeNoise: Effect;
   bakeDetail: Effect;
+  /** Ground materials: height + masks, then normal / albedo / roughness, once per material. */
+  bakeConcreteHeight: Effect;
+  bakeConcrete: Effect;
+  bakeConcreteAtlas: Effect;
+  bakeGravelHeight: Effect;
+  bakeGravel: Effect;
+  bakeGravelAtlas: Effect;
   grid: Effect;
   fire: Effect;
   resolve: Effect;
@@ -128,6 +139,12 @@ interface Targets {
   noiseAtlas: Target;
   /** Tileable 2D high-frequency detail. Baked once. */
   detail: Target;
+  /** Scratch targets for the material bakes: height + masks (rgba16float), then the finished 1024² tile. */
+  materialHeight: Target;
+  materialTile: Target;
+  /** Baked ground materials as level atlases: colors[0] albedo + roughness, colors[1] tangent normal + height + cavity. */
+  concrete: Target;
+  gravel: Target;
   /** Sun shadow map: light-space depth in r32float. */
   shadow: Target;
   /** Lit geometry: radiance in colors[0], camera distance in colors[1] (r32float), normal + occludable share in colors[2], plus depth. */
@@ -150,6 +167,9 @@ interface Targets {
 // Must match the constants in thruster-common.wgsl.
 const NOISE_ATLAS_SIZE = (128 + 2) * 8;
 const DETAIL_SIZE = 512;
+/** Must match material-common.wgsl: 1024² tiles, packed as a 4-level atlas with periodic borders. */
+const MATERIAL_SIZE = 1024;
+const MATERIAL_ATLAS: [number, number] = [1368, 1026];
 /** 16 x 16 slices of (64 + 2 border)². Must match plume-volume.wgsl. */
 const PLUME_GRID_SIZE = (64 + 2) * 16;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
@@ -374,6 +394,8 @@ async function dumpIntermediates(
 ): Promise<void> {
   await report('noise-atlas', await targets.noiseAtlas.read(), targets.noiseAtlas.size);
   await report('detail', await targets.detail.read(), targets.detail.size);
+  await report('concrete', await targets.concrete.read(), targets.concrete.size);
+  await report('gravel', await targets.gravel.read(), targets.gravel.size);
   const preview = gpu.effect(debugPreviewWgsl, { label: 'thrusters-debug-preview' });
   type Job = [ThrusterIntermediate, Target['color'], readonly [number, number], { exposure: number; mode: number }];
   const jobs: Job[] = [
@@ -381,6 +403,8 @@ async function dumpIntermediates(
     ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
     ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
     ['scene-normal', targets.scene.colors[2], targets.scene.size, { exposure: 1, mode: 1 }],
+    ['concrete-normal', targets.concrete.colors[1], targets.concrete.size, { exposure: 1, mode: 1 }],
+    ['gravel-normal', targets.gravel.colors[1], targets.gravel.size, { exposure: 1, mode: 1 }],
     ['plume-grid', targets.plumeGrid.color, targets.plumeGrid.size, { exposure: 0.25, mode: 0 }],
     ['fire-hdr', targets.fireHistory.read.color, targets.fireHistory.read.size, { exposure: 1, mode: 0 }],
     ['bloom', targets.bloomA.color, targets.bloomA.size, { exposure: 1, mode: 0 }],
@@ -405,6 +429,12 @@ function createEffects(gpu: Gpu, label: string, quality: ThrusterQuality): Effec
     quality,
     bakeNoise: gpu.effect(bakeNoiseWgsl, { label: `${label}-bake-noise` }),
     bakeDetail: gpu.effect(bakeDetailWgsl, { label: `${label}-bake-detail` }),
+    bakeConcreteHeight: gpu.effect(bakeMaterialHeightWgsl, { label: `${label}-bake-concrete-height` }),
+    bakeConcrete: gpu.effect(bakeMaterialFinishWgsl, { label: `${label}-bake-concrete` }),
+    bakeConcreteAtlas: gpu.effect(bakeMaterialAtlasWgsl, { label: `${label}-bake-concrete-atlas` }),
+    bakeGravelHeight: gpu.effect(bakeMaterialHeightWgsl, { label: `${label}-bake-gravel-height` }),
+    bakeGravel: gpu.effect(bakeMaterialFinishWgsl, { label: `${label}-bake-gravel` }),
+    bakeGravelAtlas: gpu.effect(bakeMaterialAtlasWgsl, { label: `${label}-bake-gravel-atlas` }),
     grid: gpu.effect(gridWgsl, { label: `${label}-grid` }),
     fire: gpu.effect(PLUME_MODE === 'grid' ? fireWgsl : fireDirectWgsl, { label: `${label}-fire` }),
     resolve: gpu.effect(resolveWgsl, { label: `${label}-resolve` }),
@@ -434,6 +464,10 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string,
   return {
     noiseAtlas: gpu.target({ size: [NOISE_ATLAS_SIZE, NOISE_ATLAS_SIZE], format: 'rgba8unorm', label: `${label}-noise-atlas` }),
     detail: gpu.target({ size: [DETAIL_SIZE, DETAIL_SIZE], format: 'rgba8unorm', label: `${label}-detail` }),
+    materialHeight: gpu.target({ size: [MATERIAL_SIZE, MATERIAL_SIZE], format: 'rgba16float', label: `${label}-material-height` }),
+    materialTile: gpu.target({ size: [MATERIAL_SIZE, MATERIAL_SIZE], colors: [{ format: 'rgba8unorm' }, { format: 'rgba8unorm' }], label: `${label}-material-tile` }),
+    concrete: gpu.target({ size: MATERIAL_ATLAS, colors: [{ format: 'rgba8unorm' }, { format: 'rgba8unorm' }], label: `${label}-concrete` }),
+    gravel: gpu.target({ size: MATERIAL_ATLAS, colors: [{ format: 'rgba8unorm' }, { format: 'rgba8unorm' }], label: `${label}-gravel` }),
     shadow: gpu.target({ size: [SHADOW.size, SHADOW.size], format: 'r32float', depth: true, label: `${label}-shadow` }),
     scene: gpu.target({ size: full, colors: [{ format: HDR_FORMAT }, { format: 'r32float' }, { format: 'rgba8unorm' }], depth: true, label: `${label}-scene` }),
     ...(variant.ao ? {
@@ -479,7 +513,12 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
       shader: sceneWgsl,
       mesh,
       label: `${label}-${name}`,
-      set: { detail: targets.detail, detailSamp: effects.repeatSampler, shadowMap: targets.shadow },
+      set: {
+        detail: targets.detail, detailSamp: effects.repeatSampler, shadowMap: targets.shadow,
+        concreteColor: targets.concrete, concreteNormal: targets.concrete.colors[1],
+        gravelColor: targets.gravel, gravelNormal: targets.gravel.colors[1],
+        atlasSamp: effects.clampSampler,
+      },
     }));
     shadowDraws.push(gpu.draw({ shader: shadowWgsl, mesh, label: `${label}-${name}-shadow` }));
   }
@@ -488,6 +527,12 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
 
 function setConstants(effects: Effects, targets: Targets): void {
   const plume = { ...PLUME, axis: PLUME_AXIS };
+  effects.bakeConcreteHeight.set({ mat: { kind: 0 } });
+  effects.bakeConcrete.set({ mat: { kind: 0 }, height: targets.materialHeight });
+  effects.bakeGravelHeight.set({ mat: { kind: 1 } });
+  effects.bakeGravel.set({ mat: { kind: 1 }, height: targets.materialHeight });
+  effects.bakeConcreteAtlas.set({ color: targets.materialTile, normal: targets.materialTile.colors[1] });
+  effects.bakeGravelAtlas.set({ color: targets.materialTile, normal: targets.materialTile.colors[1] });
   effects.grid.set({
     params: { time: 0, motion: 1, frame: -1 },
     atlas: targets.noiseAtlas,
@@ -528,7 +573,7 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets, cam
   const sunViewProj = sunCamera();
   for (const draw of geometry.draws) {
     draw.set({
-      camera: { viewProj, position: camera.position, time: 0 },
+      camera: { viewProj, position: camera.position, time: 0, pixelAngle: (2 * Math.tan(fov / 2)) / height },
       lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, shadowExtent: 2 * SHADOW.halfExtent, sunViewProj },
       plumeLight: { nozzle: PLUME.nozzle, axis: PLUME_AXIS, ...PLUME_LIGHT },
     });
@@ -601,6 +646,8 @@ function setFrame(effects: Effects, time: number, frameIndex: number): void {
 async function prewarm(effects: Effects, geometry: Geometry, targets: Targets, output: Output): Promise<void> {
   await Promise.all([
     effects.bakeNoise.compile(targets.noiseAtlas), effects.bakeDetail.compile(targets.detail),
+    effects.bakeConcreteHeight.compile(targets.materialHeight), effects.bakeConcrete.compile(targets.materialTile), effects.bakeConcreteAtlas.compile(targets.concrete),
+    effects.bakeGravelHeight.compile(targets.materialHeight), effects.bakeGravel.compile(targets.materialTile), effects.bakeGravelAtlas.compile(targets.gravel),
     ...geometry.draws.map((draw) => draw.compile(targets.scene)),
     ...geometry.shadowDraws.map((draw) => draw.compile(targets.shadow)),
     effects.grid.compile(targets.plumeGrid), effects.fire.compile(targets.march), effects.resolve.compile(targets.fireHistory.write), effects.brightPass.compile(targets.bloomA),
@@ -621,6 +668,15 @@ function bakeStatic(gpu: Gpu, effects: Effects, geometry: Geometry, targets: Tar
   gpu.frame((frame) => {
     frame.pass({ target: targets.noiseAtlas, clear: CLEAR }, (pass) => pass.draw(effects.bakeNoise));
     frame.pass({ target: targets.detail, clear: CLEAR }, (pass) => pass.draw(effects.bakeDetail));
+    // Ground materials: height + masks into the scratch target, then the finish
+    // pass derives normals, cavity, albedo and roughness into a tile, and the
+    // atlas pass packs the tile with its coarser levels. Once per material.
+    frame.pass({ target: targets.materialHeight, clear: CLEAR }, (pass) => pass.draw(effects.bakeConcreteHeight));
+    frame.pass({ target: targets.materialTile, clear: CLEAR }, (pass) => pass.draw(effects.bakeConcrete));
+    frame.pass({ target: targets.concrete, clear: CLEAR }, (pass) => pass.draw(effects.bakeConcreteAtlas));
+    frame.pass({ target: targets.materialHeight, clear: CLEAR }, (pass) => pass.draw(effects.bakeGravelHeight));
+    frame.pass({ target: targets.materialTile, clear: CLEAR }, (pass) => pass.draw(effects.bakeGravel));
+    frame.pass({ target: targets.gravel, clear: CLEAR }, (pass) => pass.draw(effects.bakeGravelAtlas));
     frame.pass({ target: targets.shadow, clear: [1, 0, 0, 1] }, (pass) => {
       for (const draw of geometry.shadowDraws) pass.draw(draw);
     });

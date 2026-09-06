@@ -5,7 +5,8 @@ export const meta = {
   thumb: { warmupFrames: 1, time: 6.2 },
   files: [
     'example.ts', 'plume-volume.wgsl', 'grid.wgsl', 'fire.wgsl', 'fire-direct.wgsl', 'resolve.wgsl', 'thruster-common.wgsl',
-    'bake-noise.wgsl', 'bake-detail.wgsl', 'scene.wgsl', 'shadow.wgsl', 'ao.wgsl', 'ao-blur.wgsl', 'ao-apply.wgsl',
+    'bake-noise.wgsl', 'bake-detail.wgsl', 'material-common.wgsl', 'bake-material-height.wgsl', 'bake-material-finish.wgsl', 'bake-material-atlas.wgsl',
+    'scene.wgsl', 'shadow.wgsl', 'ao.wgsl', 'ao-blur.wgsl', 'ao-apply.wgsl',
     'bright-pass.wgsl', 'blur.wgsl', 'composite.wgsl', 'post.wgsl', 'debug-preview.wgsl', 'engine.ts', 'cad.ts',
   ],
 } as const;

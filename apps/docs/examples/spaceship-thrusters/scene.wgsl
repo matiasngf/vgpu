@@ -1,3 +1,5 @@
+import { MAT_SIZE, MAT_LEVELS, atlasUv } from "./material-common.wgsl";
+
 // Lit geometry pass for the engine, test stand and pad. Writes scene-linear
 // radiance to @location(0), camera distance to @location(1) so the plume
 // raymarch can stop at surfaces and composite over the scene, and the world
@@ -8,6 +10,7 @@ struct Camera {
   viewProj: mat4x4f,
   position: vec3f,
   time: f32,
+  pixelAngle: f32,      // radians per pixel, for fading baked detail with distance
 }
 
 struct Lighting {
@@ -44,6 +47,17 @@ struct PlumeLight {
 @group(0) @binding(3) var detail: texture_2d<f32>;
 @group(0) @binding(4) var detailSamp: sampler;
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
+// Baked ground materials (see bake-material-*.wgsl): level atlases of albedo +
+// roughness and tangent normal + height + cavity, sampled with a clamp
+// sampler through atlasUv (the tiles carry their own periodic border).
+@group(0) @binding(6) var concreteColor: texture_2d<f32>;
+@group(0) @binding(7) var concreteNormal: texture_2d<f32>;
+@group(0) @binding(8) var gravelColor: texture_2d<f32>;
+@group(0) @binding(9) var gravelNormal: texture_2d<f32>;
+@group(0) @binding(10) var atlasSamp: sampler;
+
+const CONCRETE_TILE = 3.0;   // world units per texture repeat
+const GRAVEL_TILE = 1.5;
 
 struct VertexIn {
   @location(0) position: vec3f,
@@ -82,6 +96,57 @@ struct Material {
   albedo: vec3f,
   roughness: f32,
   metallic: f32,
+  normal: vec3f,    // shading normal (normal-mapped for the ground)
+}
+
+struct GroundSample {
+  albedo: vec3f,    // ~1.0 mean, multiplied by the material's base colour
+  roughness: f32,
+  normal: vec3f,    // world space
+  cavity: f32,
+}
+
+// One trilinear tap of a baked ground material: colour + tangent normal from
+// the two atlas levels around `lod`, with the tangent frame rotated by `rot`
+// (the anti-tiling second layer is sampled on a rotated uv set, so its
+// normal has to be rotated back).
+fn groundTap(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, uv: vec2f, lod: f32, rot: mat2x2f) -> array<vec4f, 2> {
+  let l0 = i32(floor(lod));
+  let l1 = min(l0 + 1, MAT_LEVELS - 1);
+  let t = fract(lod);
+  let c = mix(textureSampleLevel(colorTex, atlasSamp, atlasUv(uv, l0), 0.0), textureSampleLevel(colorTex, atlasSamp, atlasUv(uv, l1), 0.0), t);
+  let nm = mix(textureSampleLevel(normalTex, atlasSamp, atlasUv(uv, l0), 0.0), textureSampleLevel(normalTex, atlasSamp, atlasUv(uv, l1), 0.0), t);
+  let tangent = rot * (nm.xy * 2.0 - 1.0);
+  // Reconstruct the up component; the atlas only stores xy.
+  let up = sqrt(max(1.0 - dot(tangent, tangent), 0.0));
+  return array<vec4f, 2>(c, vec4f(tangent, up, nm.w));
+}
+
+// Two layers of the same tile, the second rotated and rescaled, blended by a
+// macro mask (the "randomized tiling" trick) so the repeat never lines up;
+// then the tangent normal is applied on the world XZ frame.
+fn groundMaterial(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, world: vec3f, n: vec3f, tile: f32) -> GroundSample {
+  let uvA = world.xz / tile;
+  let ca = 0.8; let sa = 0.6; // 37 degrees
+  let rotB = mat2x2f(ca, sa, -sa, ca);
+  let scaleB = 0.83;
+  let uvB = rotB * world.xz / (tile * scaleB) + vec2f(0.37, 0.71);
+  let macroMask = textureSampleLevel(detail, detailSamp, world.xz * 0.021 + vec2f(0.13, 0.57), 0.0).r;
+  let m = smoothstep(0.38, 0.62, macroMask);
+  // Level-0 texels per pixel; each atlas level is 4x coarser (2 in lod units).
+  let footprint = distance(camera.position, world) * camera.pixelAngle / (tile / MAT_SIZE);
+  let lod = clamp(0.5 * log2(max(footprint, 1.0)), 0.0, f32(MAT_LEVELS - 1));
+  let a = groundTap(colorTex, normalTex, uvA, lod, mat2x2f(1.0, 0.0, 0.0, 1.0));
+  let b = groundTap(colorTex, normalTex, uvB, clamp(lod - 0.5 * log2(scaleB), 0.0, f32(MAT_LEVELS - 1)), transpose(rotB));
+  let color = mix(a[0], b[0], m);
+  let nm = mix(a[1], b[1], m);
+  // Tangent frame of the flat ground: +X, +Z, up (nm = x, y, up, cavity).
+  var out: GroundSample;
+  out.albedo = color.rgb * 2.0;
+  out.roughness = color.a;
+  out.normal = normalize(vec3f(nm.x, nm.z, nm.y));
+  out.cavity = nm.w;
+  return out;
 }
 
 // Soot streak the exhaust leaves on the pad: darkens along +X from the nozzle.
@@ -92,38 +157,52 @@ fn scorch(world: vec3f) -> f32 {
   return along * across * (0.55 + 0.6 * breakup);
 }
 
-fn materialFor(id: u32, world: vec3f) -> Material {
+fn materialFor(id: u32, world: vec3f, n: vec3f) -> Material {
   switch (id) {
-    case 0u: { return Material(vec3f(0.022, 0.021, 0.02), 0.55, 0.1); }      // matte black (nozzle, insulated lines)
-    case 1u: { return Material(vec3f(0.14, 0.145, 0.15), 0.45, 0.8); }       // dark steel housings
-    case 2u: { return Material(vec3f(0.42, 0.43, 0.44), 0.32, 0.95); }       // stainless lines and valves
+    case 0u: { return Material(vec3f(0.022, 0.021, 0.02), 0.55, 0.1, n); }   // matte black (nozzle, insulated lines)
+    case 1u: { return Material(vec3f(0.14, 0.145, 0.15), 0.45, 0.8, n); }    // dark steel housings
+    case 2u: { return Material(vec3f(0.42, 0.43, 0.44), 0.32, 0.95, n); }    // stainless lines and valves
     case 3u: {                                                                // concrete pad
-      let grain = textureSampleLevel(detail, detailSamp, world.xz * 0.045, 0.0);
-      let fine = textureSampleLevel(detail, detailSamp, world.xz * 0.6, 0.0).r;
+      let g = groundMaterial(concreteColor, concreteNormal, world, n, CONCRETE_TILE);
+      // Slabs: joints with a bevelled edge, a random tone per slab, and broad
+      // damp / weathered patches across several slabs.
       let cell = world.xz / 8.0 + vec2f(0.25, 0.5);
-      let joints = 1.0 - 0.22 * (1.0 - smoothstep(0.0, 0.014, min(abs(fract(cell.x) - 0.5), abs(fract(cell.y) - 0.5))));
+      let toJoint = vec2f(fract(cell.x) - 0.5, fract(cell.y) - 0.5);
+      let jointDist = min(abs(toJoint.x), abs(toJoint.y));
+      let joints = 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.014, jointDist));
+      // Chamfered joint edge, a few centimetres wide, sloping down into the joint.
+      let bevel = (1.0 - smoothstep(0.014, 0.021, jointDist)) * step(0.011, jointDist);
+      var normal = g.normal;
+      if (bevel > 0.0) {
+        let axis = select(vec3f(0.0, 0.0, -sign(toJoint.y)), vec3f(-sign(toJoint.x), 0.0, 0.0), abs(toJoint.x) < abs(toJoint.y));
+        normal = normalize(mix(normal, axis, bevel * 0.3));
+      }
       let slab = floor(cell + 0.5);
       let tone = 0.92 + 0.14 * fract(sin(dot(slab, vec2f(12.9898, 78.233))) * 43758.5453);
       let patches = textureSampleLevel(detail, detailSamp, world.xz * 0.012 + vec2f(0.3, 0.7), 0.0).r;
-      let albedo = vec3f(0.33, 0.315, 0.285) * (0.72 + 0.3 * grain.r + 0.1 * fine + 0.25 * patches) * joints * tone;
+      let damp = smoothstep(0.55, 0.8, textureSampleLevel(detail, detailSamp, world.xz * 0.02 + vec2f(0.6, 0.2), 0.0).r);
+      var albedo = vec3f(0.33, 0.315, 0.285) * g.albedo * (0.82 + 0.25 * patches) * joints * tone;
+      albedo = mix(albedo, albedo * vec3f(0.72, 0.7, 0.68), damp * 0.6);
       let burn = scorch(world);
-      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), burn * 0.8), 0.9 + 0.08 * burn, 0.0);
+      albedo = mix(albedo, vec3f(0.09, 0.08, 0.075), burn * 0.8);
+      let roughness = g.roughness + 0.08 * burn - 0.15 * damp + 0.1 * (1.0 - joints);
+      return Material(albedo, clamp(roughness, 0.3, 1.0), 0.0, normal);
     }
     case 4u: {                                                                // gravel apron
-      let grain = textureSampleLevel(detail, detailSamp, world.xz * 0.12, 0.0);
-      let fine = textureSampleLevel(detail, detailSamp, world.xz * 1.1, 0.0).g;
-      let stone = textureSampleLevel(detail, detailSamp, world.xz * 2.5, 0.0).b;
-      var albedo = vec3f(0.36, 0.32, 0.26) * (0.85 + 0.25 * grain.r + 0.3 * fine);
-      albedo *= mix(0.65, 1.45, smoothstep(0.35, 0.75, stone));
-      return Material(mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.6), 0.95, 0.0);
+      let g = groundMaterial(gravelColor, gravelNormal, world, n, GRAVEL_TILE);
+      // Broad colour drift across the apron (wetter and darker in places).
+      let patches = textureSampleLevel(detail, detailSamp, world.xz * 0.015 + vec2f(0.1, 0.4), 0.0).r;
+      var albedo = vec3f(0.36, 0.32, 0.26) * g.albedo * (0.8 + 0.35 * patches);
+      albedo = mix(albedo, vec3f(0.09, 0.08, 0.075), scorch(world) * 0.6);
+      return Material(albedo, clamp(g.roughness, 0.3, 1.0), 0.0, g.normal);
     }
     case 5u: {                                                                // painted dark steel (stand), worn
       let wear = textureSampleLevel(detail, detailSamp, world.xz * 0.7 + world.y * 0.37, 0.0).g;
-      return Material(vec3f(0.075, 0.08, 0.085) * (0.75 + 0.5 * wear), 0.5 + 0.25 * wear, 0.35);
+      return Material(vec3f(0.075, 0.08, 0.085) * (0.75 + 0.5 * wear), 0.5 + 0.25 * wear, 0.35, n);
     }
-    case 6u: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0); }         // white decal
-    case 7u: { return Material(vec3f(0.85, 0.6, 0.08), 0.5, 0.2); }          // safety yellow
-    default: { return Material(vec3f(1.0, 0.95, 0.85), 0.3, 0.0); }          // lamp face (emissive, see fs_main)
+    case 6u: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0, n); }      // white decal
+    case 7u: { return Material(vec3f(0.85, 0.6, 0.08), 0.5, 0.2, n); }       // safety yellow
+    default: { return Material(vec3f(1.0, 0.95, 0.85), 0.3, 0.0, n); }       // lamp face (emissive, see fs_main)
   }
 }
 
@@ -182,14 +261,17 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
 }
 
 @fragment fn fs_main(in: VertexOut, @builtin(front_facing) frontFacing: bool) -> FragOut {
-  var n = normalize(in.normal);
+  var geometricNormal = normalize(in.normal);
   // No cull mode: both faces rasterize, so flip normals seen from behind
   // (the inside of the bell, the underside of pipes).
-  if (!frontFacing) { n = -n; }
+  if (!frontFacing) { geometricNormal = -geometricNormal; }
   let v = normalize(camera.position - in.world);
-  let m = materialFor(in.material, in.world);
+  let m = materialFor(in.material, in.world, geometricNormal);
+  // Shading uses the (possibly normal-mapped) material normal; the shadow
+  // lookup and the occlusion pass keep the geometric one.
+  let n = m.normal;
 
-  var color = shade(n, v, lighting.sunDir, lighting.sunColor * lighting.sunIntensity, m) * sunVisibility(in.world, n);
+  var color = shade(n, v, lighting.sunDir, lighting.sunColor * lighting.sunIntensity, m) * sunVisibility(in.world, geometricNormal);
   // Radiance that screen-space occlusion may darken: the hemisphere ambient
   // fully, and the plume and work light partly (both are wide sources whose
   // light also comes from the sides, so creases receive less of them).
@@ -240,6 +322,6 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   var out: FragOut;
   out.color = vec4f(color, 1.0);
   out.depth = vec4f(viewDistance, 0.0, 0.0, 1.0);
-  out.aux = vec4f(n * 0.5 + 0.5, clamp(occludableShare, 0.0, 1.0));
+  out.aux = vec4f(geometricNormal * 0.5 + 0.5, clamp(occludableShare, 0.0, 1.0));
   return out;
 }
