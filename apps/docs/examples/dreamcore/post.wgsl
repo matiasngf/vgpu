@@ -35,7 +35,7 @@ fn lin2srgb(c: vec3f) -> vec3f {
 @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let centered = uv - vec2f(0.5);
   // Tiny chromatic aberration toward the corners.
-  let ca = centered * 0.0018 * length(centered);
+  let ca = centered * 0.0008 * length(centered);
   let r = textureSampleLevel(scene, samp, uv + ca, 0.0).r;
   let g = textureSampleLevel(scene, samp, uv, 0.0).g;
   let b = textureSampleLevel(scene, samp, uv - ca, 0.0).b;
