@@ -61,14 +61,15 @@ export fn gridTileUv(g: vec2f, slice: i32) -> vec2f {
 // 1. Soot in the initial mixing zone radiates as a blackbody (1550-2800 K):
 //    deep red fringe, orange body, yellow-white where it is hottest.
 // 2. The exhaust gas itself glows through hydrogen Balmer / OH emission —
-//    optically thin, magenta-pink. It dominates the core (clipping to
-//    pink-white) and the thin fringe, which mixes additively with the teal
-//    sky into the lavender edge seen in the reference.
+//    optically thin, magenta-violet. It dominates the core (clipping to
+//    lavender-white) and the thin fringe. Chromaticities were sampled from a
+//    night test-firing photo: exit jet (0.36, 0.48, 1.0), mid plume
+//    (0.86, 0.70, 1.0), far plume (0.88, 0.52, 1.0) in linear ratios.
 // 3. Near the exit, fuel-rich gas emits blue-violet Swan bands along the
-//    engine jets, with warm-white shock diamonds on the axis.
-const GAS_GLOW: vec3f = vec3f(1.0, 0.27, 0.28);
-const EXIT_GLOW: vec3f = vec3f(0.42, 0.52, 1.0);
-const DIAMOND_GLOW: vec3f = vec3f(1.0, 0.92, 1.0);
+//    engine jets, with white shock diamonds on the axis.
+const GAS_GLOW: vec3f = vec3f(0.9, 0.48, 1.0);
+const EXIT_GLOW: vec3f = vec3f(0.36, 0.5, 1.0);
+const DIAMOND_GLOW: vec3f = vec3f(0.95, 0.92, 1.0);
 
 // Planckian-locus chromaticity (Kang et al. 2002 fit, valid 1667-4000 K)
 // converted to linear sRGB with Y = 1, scaled by a T^4 luminance term.
@@ -159,6 +160,9 @@ export fn evaluatePlume(
   let fireStrength = mix(0.06, 1.0, smoothstep(1.5, 8.5, sR));
   let burn = smoothstep(2.0, 8.0, sR);
   let heat = smoothstep(4.0, 11.0, sR);
+  // Downstream the plume opens up and mixes out: it gets thinner and its
+  // edge breaks into wisps, so the wider body does not get brighter.
+  let disperse = smoothstep(3.5, 13.0, sR);
 
   // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
   // This only sets the low-frequency silhouette and opacity.
@@ -190,7 +194,7 @@ export fn evaluatePlume(
   let diamond = smoothstep(0.5, 0.05, abs(phase - 0.5) * 1.6 + radEnv * 0.9) * smoothstep(4.2, 5.0, sR) * (1.0 - smoothstep(6.0, 14.0, sR));
 
   let turb = (n.r - 0.5) * 2.0;
-  let erosion = mix(0.12, 0.3, burn);
+  let erosion = mix(0.12, 0.3, burn) + 0.4 * disperse;
   // Attach cleanly to the lip: turbulence only starts a little past the exit.
   let ramp = smoothstep(0.1, 0.8, s);
   let fadeEnd = smoothstep(0.0, 0.15, s) * pow(1.0 - smoothstep(6.0, LENGTH * unit, s), 1.5);
@@ -203,10 +207,10 @@ export fn evaluatePlume(
 
   // The fire: one fibrous body from the lip onward. Fibres both erode the
   // shell and poke past it; near the exit it is thin and see-through.
-  let shellFire = 1.0 - radEnv + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn) + (fib2.r - 0.5) * 0.12) * ramp;
-  var density = smoothstep(0.0, 0.1, shellFire);
+  let shellFire = 1.0 - radEnv + (turb * erosion + (filament - 0.45) * (0.12 + 0.22 * burn + 0.2 * disperse) + (fib2.r - 0.5) * (0.12 + 0.15 * disperse)) * ramp;
+  var density = smoothstep(0.0, 0.1 + 0.3 * disperse, shellFire);
   density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
-  density *= fadeEnd * fireStrength;
+  density *= fadeEnd * fireStrength * mix(1.0, 0.45, disperse);
 
   // Soot burns in the shear layer of the afterburner where the fuel-rich
   // gas meets air. Absorbing and emitting.
@@ -222,13 +226,19 @@ export fn evaluatePlume(
   // Radiance climbs steeply toward the axis: the shell just clips red on the
   // sensor, the core saturates every channel.
   let axial = core * core * core;
-  let glow = GAS_GLOW * (density * burn * (0.22 + 2.0 * axial + 2.8 * ridge) * plume.glowGain)
-    // The densest, hottest core also radiates thermally (warm white).
-    + coreWhite * (density * heat * axial * (0.35 + 1.5 * ridge) * 7.0)
-    // Exhaust capsule leaving the nozzle: saturated white-blue, full width.
-    + mix(vec3f(1.0, 0.6, 0.8), vec3f(1.0, 0.98, 1.0), clamp(glowCore, 0.0, 1.0)) * (capsuleDensity * (0.6 + 0.8 * glowCore) * plume.exitGain * 12.0)
-    // Near the exit the thin fire glows faintly violet-pink (Swan bands).
-    + mix(EXIT_GLOW, GAS_GLOW, 0.55) * (density * (1.0 - burn) * (0.6 + 0.4 * hairs) * plume.exitGain * 0.8)
+  // Emission per unit falls off hard as the gas mixes out: the far plume in
+  // the reference is a mid-tone, only the exit region clips the sensor.
+  let spent = mix(1.0, 0.08, disperse);
+  // The afterburning gas starts out blue-violet just past the neck (the
+  // reference's electric-blue jets) and turns magenta as it burns through.
+  let gasTint = mix(vec3f(0.45, 0.58, 1.0), GAS_GLOW, smoothstep(3.0, 8.5, sR));
+  let glow = gasTint * (density * burn * (0.22 + 2.0 * axial + 2.8 * ridge) * plume.glowGain * spent)
+    // The densest, hottest core also radiates thermally (lavender white).
+    + coreWhite * (density * heat * axial * (0.35 + 1.5 * ridge) * 3.5 * spent)
+    // Exhaust capsule leaving the nozzle: blue-white, full width.
+    + mix(vec3f(0.42, 0.56, 1.0), vec3f(0.8, 0.86, 1.0), clamp(glowCore, 0.0, 1.0)) * (capsuleDensity * (0.6 + 0.8 * glowCore) * plume.exitGain * 12.0)
+    // Near the exit the thin fire glows blue-violet (Swan bands).
+    + mix(EXIT_GLOW, GAS_GLOW, 0.3) * (density * (1.0 - burn) * (0.6 + 0.4 * hairs) * plume.exitGain * 0.8)
     // Mach disk: a thin bright re-heated slab at the squeeze.
     + DIAMOND_GLOW * (density * machDisk * plume.exitGain * 0.25);
 
@@ -236,14 +246,16 @@ export fn evaluatePlume(
   // blue-violet gas, with the first diamonds glowing warm white.
   let jets = smoothstep(0.5, 0.9, fib2.g * 0.6 + fib3 * 0.5);
   let hazeDensity = smoothstep(0.0, 0.08, 1.0 - radEnv + (fib2.r - 0.5) * 0.08) * (0.2 + 1.1 * jets + 0.3 * diamond) * 0.18 * shock;
-  let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * plume.exitGain * 0.5;
-  let diamondGlow = DIAMOND_GLOW * diamond * density * burn * 2.5;
+  let exitGlow = (EXIT_GLOW * (0.25 + 1.2 * jets) + DIAMOND_GLOW * diamond * 1.5) * hazeDensity * plume.exitGain * 1.1;
+  let diamondGlow = DIAMOND_GLOW * diamond * density * burn * 2.5 * spent;
 
   // High absorption in the fire keeps its visible layer thin, so fibres at
   // different depths do not average into mush; the envelope stays thin.
-  let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) + capsuleDensity * 6.0 + hazeDensity * 0.35;
+  // Mixed-out gas downstream is far less opaque, so the widened plume stays
+  // see-through instead of a solid bright body.
+  let sigma = density * (0.4 + 8.0 * burn) * mix(1.0, 1.4, sootFrac) * mix(1.0, 0.18, disperse) + capsuleDensity * 6.0 + hazeDensity * 0.35;
   // Soot rides on opacity in the original integrator; per unit length that is
   // its radiance times the extinction. Convert plume units to world units.
-  let emission = sootRadiance * sootFrac * sigma + glow + exitGlow + diamondGlow;
+  let emission = sootRadiance * sootFrac * sigma * spent + glow + exitGlow + diamondGlow;
   return vec4f(emission * unit, sigma * unit);
 }

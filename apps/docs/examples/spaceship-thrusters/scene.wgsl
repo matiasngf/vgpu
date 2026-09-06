@@ -13,22 +13,24 @@ struct Camera {
   pixelAngle: f32,      // radians per pixel, for fading baked detail with distance
 }
 
+// Night: no sun. Two floodlights on poles (the key one casts the shadow map)
+// and the plume light the scene; a faint night-sky ambient fills the rest.
 struct Lighting {
-  sunDir: vec3f,        // unit vector TOWARD the sun
-  sunIntensity: f32,
-  sunColor: vec3f,
-  ambient: f32,
   skyColor: vec3f,
-  shadowTexel: f32,     // 1 / shadow map size
+  ambient: f32,
   groundColor: vec3f,
-  shadowBias: f32,
-  sunViewProj: mat4x4f,
-  shadowExtent: f32,    // world units covered by the shadow map
+  shadowTexel: f32,     // 1 / shadow map size
+  shadowViewProj: mat4x4f,  // key floodlight, perspective
   fogColor: vec3f,
   fogDensity: f32,
-  // A floodlight on a pole by the stand (xyz position, w intensity).
-  workLight: vec4f,
-  workLightColor: vec3f,
+  keyLight: vec4f,      // xyz position, w intensity (key floodlight, shadowed)
+  keyColor: vec3f,
+  shadowBias: f32,      // world units
+  keySpot: vec4f,       // xyz unit direction the lamp points, w cos(half angle)
+  fillLight: vec4f,     // xyz position, w intensity (fill floodlight)
+  fillColor: vec3f,
+  shadowFov: f32,       // tan(fov / 2) of the shadow camera, for the normal offset
+  fillSpot: vec4f,
 }
 
 // The plume lights the engine and pad as a line segment: the closest point
@@ -206,13 +208,16 @@ fn materialFor(id: u32, world: vec3f, n: vec3f) -> Material {
   }
 }
 
-// Bilinear-weighted 2x2 PCF against the light-space depth from shadow.wgsl.
-fn sunVisibility(world: vec3f, n: vec3f) -> f32 {
-  // Normal-offset + slope-scaled bias, both in shadow texels.
-  let ndl = clamp(dot(n, lighting.sunDir), 0.0, 1.0);
-  let texelWorld = lighting.shadowTexel * lighting.shadowExtent;
+// Bilinear-weighted 2x2 PCF against the light distance from shadow.wgsl.
+fn keyVisibility(world: vec3f, n: vec3f) -> f32 {
+  let toLight = lighting.keyLight.xyz - world;
+  let dist = length(toLight);
+  let ndl = clamp(dot(n, toLight / dist), 0.0, 1.0);
+  // Normal-offset + slope-scaled bias, in shadow texels at this distance.
+  let texelWorld = lighting.shadowTexel * 2.0 * lighting.shadowFov * dist;
   let offsetWorld = world + n * texelWorld * (1.5 + 3.0 * (1.0 - ndl));
-  let clip = lighting.sunViewProj * vec4f(offsetWorld, 1.0);
+  let clip = lighting.shadowViewProj * vec4f(offsetWorld, 1.0);
+  if (clip.w <= 0.0) { return 0.0; }
   let ndc = clip.xyz / clip.w;
   if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0) { return 1.0; }
   let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -221,12 +226,22 @@ fn sunVisibility(world: vec3f, n: vec3f) -> f32 {
   let i0 = vec2i(floor(base));
   let f = fract(base);
   let bias = lighting.shadowBias * (1.0 + 2.0 * (1.0 - ndl));
+  let offsetDist = distance(offsetWorld, lighting.keyLight.xyz);
   var taps = array<f32, 4>();
   for (var k = 0; k < 4; k++) {
     let texel = clamp(i0 + vec2i(k & 1, k >> 1), vec2i(0), vec2i(size) - 1);
-    taps[k] = select(0.0, 1.0, ndc.z - bias <= textureLoad(shadowMap, texel, 0).r);
+    taps[k] = select(0.0, 1.0, offsetDist - bias <= textureLoad(shadowMap, texel, 0).r);
   }
   return mix(mix(taps[0], taps[1], f.x), mix(taps[2], taps[3], f.x), f.y);
+}
+
+// Floodlight: inverse-square point light with a soft spot cone.
+fn floodlight(light: vec4f, color: vec3f, spot: vec4f, world: vec3f, n: vec3f, v: vec3f, m: Material) -> vec3f {
+  let toLight = light.xyz - world;
+  let dist2 = max(dot(toLight, toLight), 0.5);
+  let l = toLight * inverseSqrt(dist2);
+  let cone = smoothstep(spot.w, spot.w + 0.35, dot(-l, spot.xyz));
+  return shade(n, v, l, color * (light.w * cone / dist2), m);
 }
 
 fn luminance(c: vec3f) -> f32 {
@@ -271,9 +286,10 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   // lookup and the occlusion pass keep the geometric one.
   let n = m.normal;
 
-  var color = shade(n, v, lighting.sunDir, lighting.sunColor * lighting.sunIntensity, m) * sunVisibility(in.world, geometricNormal);
+  // Key floodlight, shadowed by the baked map.
+  var color = floodlight(lighting.keyLight, lighting.keyColor, lighting.keySpot, in.world, n, v, m) * keyVisibility(in.world, geometricNormal);
   // Radiance that screen-space occlusion may darken: the hemisphere ambient
-  // fully, and the plume and work light partly (both are wide sources whose
+  // fully, and the plume and fill light partly (both are wide sources whose
   // light also comes from the sides, so creases receive less of them).
   var occludable = vec3f(0.0);
 
@@ -286,8 +302,8 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   occludable += ambient;
 
   // Plume glow: closest point on the exhaust segment, colour following the
-  // exhaust (blue-white at the exit, pink downstream), intensity peaking in
-  // the afterburning zone.
+  // exhaust (blue at the exit, magenta-violet downstream), intensity peaking
+  // in the afterburning zone.
   {
     let s = clamp(dot(in.world - plumeLight.nozzle, plumeLight.axis), 0.0, plumeLight.length);
     let p = plumeLight.nozzle + plumeLight.axis * s;
@@ -295,25 +311,22 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     let dist2 = max(dot(toLight, toLight), 0.25);
     let l = toLight * inverseSqrt(dist2);
     let profile = 0.15 + smoothstep(0.0, 6.0, s) * (1.0 - smoothstep(18.0, 32.0, s));
-    let tint = mix(vec3f(0.75, 0.8, 1.0), vec3f(1.0, 0.55, 0.42), smoothstep(1.0, 8.0, s));
+    let tint = mix(vec3f(0.55, 0.65, 1.0), vec3f(0.95, 0.6, 1.0), smoothstep(1.0, 8.0, s));
     let glow = shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
     color += glow;
     occludable += glow * 0.45;
   }
 
-  // Work light: a warm floodlight on a pole; simple inverse-square point light.
+  // Fill floodlight on the far side, unshadowed.
   {
-    let toLight = lighting.workLight.xyz - in.world;
-    let dist2 = max(dot(toLight, toLight), 0.5);
-    let l = toLight * inverseSqrt(dist2);
-    let flood = shade(n, v, l, lighting.workLightColor * (lighting.workLight.w / dist2), m);
+    let flood = floodlight(lighting.fillLight, lighting.fillColor, lighting.fillSpot, in.world, n, v, m);
     color += flood;
     occludable += flood * 0.3;
   }
-  // The lamp face itself glows.
-  if (in.material == 8u) { color += vec3f(1.0, 0.9, 0.75) * 6.0; }
+  // The lamp faces themselves glow.
+  if (in.material == 8u) { color += vec3f(1.0, 0.98, 0.92) * 12.0; }
 
-  // Dusk haze: distant ground fades toward the sky colour.
+  // Night haze: distant ground fades toward the (near black) sky.
   let viewDistance = distance(camera.position, in.world);
   let fog = 1.0 - exp(-viewDistance * lighting.fogDensity);
   let occludableShare = luminance(occludable) * (1.0 - fog) / max(luminance(color), 1e-4);

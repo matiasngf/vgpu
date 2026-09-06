@@ -43,5 +43,5 @@ struct Params {
   let frame = plumeFrame(plume.axis);
   let p = plume.nozzle + plume.axis * s + frame[0] * (g.x * bound) + frame[1] * (g.y * bound);
   let time = params.time * params.motion;
-  return evaluatePlume(atlas, atlasSamp, detail, detailSamp, plume, frame, p, time, blackbody(2900.0), blackbody(1900.0), blackbody(2600.0));
+  return evaluatePlume(atlas, atlasSamp, detail, detailSamp, plume, frame, p, time, vec3f(1.0, 0.86, 1.0) * 1.4, blackbody(1900.0), blackbody(2600.0));
 }

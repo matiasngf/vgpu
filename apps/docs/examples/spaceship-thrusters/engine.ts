@@ -13,7 +13,7 @@
 //   5 painted steel (stand)   6 white decal   7 safety yellow (gantry)
 
 import {
-  box, compose, cylinder, emptyMesh, merge, normalize, revolve, rotationX, rotationZ, scale as scaleVec, sub, torus, transform,
+  box, compose, cylinder, emptyMesh, merge, normalize, revolve, rotationX, rotationY, rotationZ, scale as scaleVec, sub, torus, transform,
   translation, tube, type CadMesh, type ProfilePoint, type Vec3,
 } from './cad';
 
@@ -339,16 +339,24 @@ function iBeam(center: Vec3, length: number, height: number, width: number, axis
   return mesh;
 }
 
-/** Floodlight on a pole by the stand; `WORK_LIGHT` is where it shines from. */
-export const WORK_LIGHT: Vec3 = [-8.5, 6.5, 7.5];
+/** Floodlights on poles: the key light by the stand and a fill light across the pad. */
+export const KEY_LIGHT: Vec3 = [-8.5, 6.5, 7.5];
+export const FILL_LIGHT: Vec3 = [9, 7.5, -12];
 
-export function buildFloodlight(): CadMesh {
+/**
+ * A floodlight on a pole at `position`, its head turned to face `target`
+ * (local +Z of the head is the emissive face).
+ */
+export function buildFloodlight(position: Vec3, target: Vec3): CadMesh {
   const mesh = emptyMesh();
-  const [x, y, z] = WORK_LIGHT;
+  const [x, y, z] = position;
   merge(mesh, box([x, 0.04, z], [0.7, 0.08, 0.7], MAT_PAINT));
   merge(mesh, transform(cylinder(0.09, 0.07, 0, y + 0.1, 16, MAT_PAINT), translation([x, 0, z])));
-  // Lamp housing angled toward the engine, with the emissive face on the front.
-  const head = compose(translation([x, y, z]), rotationX(0.55), rotationZ(0.35));
+  // Aim: yaw around Y toward the target, then pitch down to it.
+  const dx = target[0] - x, dy = target[1] - y, dz = target[2] - z;
+  const yaw = Math.atan2(dx, dz);
+  const pitch = -Math.atan2(dy, Math.hypot(dx, dz));
+  const head = compose(translation([x, y, z]), rotationY(yaw), rotationX(pitch));
   merge(mesh, transform(box([0, 0, 0], [0.55, 0.42, 0.25], MAT_STEEL), head));
   merge(mesh, transform(box([0, 0, 0.14], [0.45, 0.32, 0.03], MAT_LAMP), head));
   return mesh;

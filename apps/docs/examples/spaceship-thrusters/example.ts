@@ -19,8 +19,8 @@ import postWgsl from './post.wgsl';
 import resolveWgsl from './resolve.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
-import { invert, lookAt, multiply, orthographic, pack, perspective, type Vec3 } from './cad';
-import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand, WORK_LIGHT } from './engine';
+import { invert, lookAt, merge, multiply, pack, perspective, type Vec3 } from './cad';
+import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand, FILL_LIGHT, KEY_LIGHT } from './engine';
 
 type Output = Surface | Target;
 
@@ -65,7 +65,7 @@ export interface ThrusterThumbOptions {
 const AXIS_HEIGHT = 1.7;
 /** Exhaust direction: horizontal +X (nozzle exit at the origin). */
 const PLUME_AXIS: Vec3 = [1, 0, 0];
-const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.2, glowGain: 10, exitGain: 5 };
+const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, length: 45, sootGain: 0.2, glowGain: 5, exitGain: 5 };
 const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
 /** Named camera presets, also reachable from the headless scripts. */
 export const CAMERA_PRESETS: Record<string, ThrusterCamera> = {
@@ -76,23 +76,28 @@ export const CAMERA_PRESETS: Record<string, ThrusterCamera> = {
   closeup: { position: [-1.5, 4.5, 6], target: [2.5, 1.7, 0], fovDeg: 35 },
   side: { position: [6, 3, 16], target: [6, 1.7, 0], fovDeg: 40 },
 };
-/** Orthographic sun camera covering the stand and the near plume. */
-const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
-// Late dusk: a low, warm sun grazing in from behind the stand as a rim light,
-// a dim blue sky, and the plume as the key light.
+/** Where the two floodlights are aimed. */
+const KEY_TARGET: Vec3 = [1.5, 1.2, 0];
+const FILL_TARGET: Vec3 = [1, 1.5, 0];
+/** Perspective shadow camera at the key floodlight. */
+const SHADOW = { size: 2048, fovDeg: 95, near: 1, far: 60 };
+// Night: no sun. A white metal-halide key floodlight by the stand (shadowed),
+// a warmer fill floodlight across the pad, a faint night-sky ambient, and the
+// plume itself as the dominant light on everything.
 const LIGHTING = {
-  sunDir: normalize3([0.55, 0.24, -0.7]),
-  sunIntensity: 2.2,
-  sunColor: [1.0, 0.5, 0.25],
-  ambient: 0.2,
-  skyColor: [0.18, 0.28, 0.62],
-  groundColor: [0.1, 0.08, 0.09],
-  fogColor: [0.05, 0.055, 0.1],
-  fogDensity: 0.005,
-  workLight: [...WORK_LIGHT, 130] as [number, number, number, number],
-  workLightColor: [1.0, 0.85, 0.65],
-  /** In light-space NDC depth; the span is 4 * halfExtent world units, so this is ~0.03 units. */
-  shadowBias: 0.0008,
+  ambient: 0.12,
+  skyColor: [0.03, 0.045, 0.09],
+  groundColor: [0.02, 0.015, 0.02],
+  fogColor: [0.004, 0.005, 0.01],
+  fogDensity: 0.006,
+  keyLight: [...KEY_LIGHT, 150] as [number, number, number, number],
+  keyColor: [0.95, 1.0, 0.93],
+  keySpot: [...normalize3(sub3(KEY_TARGET, KEY_LIGHT)), Math.cos((58 * Math.PI) / 180)] as [number, number, number, number],
+  fillLight: [...FILL_LIGHT, 70] as [number, number, number, number],
+  fillColor: [1.0, 0.9, 0.72],
+  fillSpot: [...normalize3(sub3(FILL_TARGET, FILL_LIGHT)), Math.cos((55 * Math.PI) / 180)] as [number, number, number, number],
+  /** World units, on top of the normal offset. */
+  shadowBias: 0.03,
 };
 /** Segment light that stands in for the plume's glow on the geometry. */
 const PLUME_LIGHT = { length: 32, intensity: 85 };
@@ -399,7 +404,7 @@ async function dumpIntermediates(
   const preview = gpu.effect(debugPreviewWgsl, { label: 'thrusters-debug-preview' });
   type Job = [ThrusterIntermediate, Target['color'], readonly [number, number], { exposure: number; mode: number }];
   const jobs: Job[] = [
-    ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: 1, mode: 2 }],
+    ['shadow-map', targets.shadow.color, targets.shadow.size, { exposure: SHADOW.far, mode: 2 }],
     ['scene-color', targets.scene.color, targets.scene.size, { exposure: 1, mode: 0 }],
     ['scene-depth', targets.scene.colors[1], targets.scene.size, { exposure: 60, mode: 2 }],
     ['scene-normal', targets.scene.colors[2], targets.scene.size, { exposure: 1, mode: 1 }],
@@ -490,7 +495,7 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
     ['engine', engineToStand(buildEngine(DEFAULT_ENGINE), AXIS_HEIGHT)],
     ['stand', buildStand(DEFAULT_ENGINE, AXIS_HEIGHT)],
     ['gantry', buildGantry()],
-    ['floodlight', buildFloodlight()],
+    ['floodlight', merge(buildFloodlight(KEY_LIGHT, KEY_TARGET), buildFloodlight(FILL_LIGHT, FILL_TARGET))],
     ['ground', buildGround()],
   ] as const;
   const meshes: Mesh[] = [];
@@ -556,7 +561,7 @@ function setConstants(effects: Effects, targets: Targets): void {
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
   const variant = QUALITY[effects.quality];
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, time: 0, skyColor: [0.05, 0.055, 0.1], ...variant.composite } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, time: 0, skyColor: [0.004, 0.005, 0.01], ...variant.composite } });
   if (variant.ao) {
     effects.ao!.set({ ao: variant.ao });
     effects.aoBlur!.set({ blur: { direction: [1, 0] } });
@@ -570,15 +575,16 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets, cam
   const view = lookAt(camera.position, camera.target);
   const projection = perspective(fov, width / height, CAMERA.near, CAMERA.far);
   const viewProj = multiply(projection, view);
-  const sunViewProj = sunCamera();
+  const shadowViewProj = keyLightCamera();
+  const shadowFov = Math.tan((SHADOW.fovDeg * Math.PI) / 360);
   for (const draw of geometry.draws) {
     draw.set({
       camera: { viewProj, position: camera.position, time: 0, pixelAngle: (2 * Math.tan(fov / 2)) / height },
-      lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, shadowExtent: 2 * SHADOW.halfExtent, sunViewProj },
+      lighting: { ...LIGHTING, shadowTexel: 1 / SHADOW.size, shadowViewProj, shadowFov },
       plumeLight: { nozzle: PLUME.nozzle, axis: PLUME_AXIS, ...PLUME_LIGHT },
     });
   }
-  for (const draw of geometry.shadowDraws) draw.set({ light: { viewProj: sunViewProj } });
+  for (const draw of geometry.shadowDraws) draw.set({ light: { viewProj: shadowViewProj, position: KEY_LIGHT } });
   const history = targets.fireHistory.read.size;
   effects.fire.set({
     params: { resolution: history, sceneScale: [width / history[0], height / history[1]] },
@@ -608,16 +614,13 @@ function setBindings(effects: Effects, geometry: Geometry, targets: Targets, cam
   setHistoryReaders(effects, targets);
 }
 
-function sunCamera() {
-  const eye: Vec3 = [
-    SHADOW.center[0] + LIGHTING.sunDir[0] * SHADOW.distance,
-    SHADOW.center[1] + LIGHTING.sunDir[1] * SHADOW.distance,
-    SHADOW.center[2] + LIGHTING.sunDir[2] * SHADOW.distance,
-  ];
-  const e = SHADOW.halfExtent;
-  // Keep the light-space depth span tight (scene is within ~2e of the centre)
-  // so the NDC bias stays a small fraction of a world unit.
-  return multiply(orthographic(-e, e, -e, e, SHADOW.distance - 2 * e, SHADOW.distance + 2 * e), lookAt(eye, SHADOW.center));
+/** Perspective camera at the key floodlight, looking where the lamp points. */
+function keyLightCamera() {
+  return multiply(perspective((SHADOW.fovDeg * Math.PI) / 180, 1, SHADOW.near, SHADOW.far), lookAt(KEY_LIGHT, KEY_TARGET));
+}
+
+function sub3(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
 function createHistory(gpu: Gpu, full: readonly [number, number], label: string): PingPongTargets {

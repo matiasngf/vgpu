@@ -150,7 +150,7 @@ fn ign(p: vec2f) -> f32 {
   }
 
   let frame = plumeFrame(plume.axis);
-  let coreWhite = blackbody(2900.0);
+  let coreWhite = vec3f(1.0, 0.86, 1.0) * 1.4; // lavender-white core, not thermal orange
   let sootCold = blackbody(1900.0);
   let sootHot = blackbody(2600.0);
   let dtWorld = (interval.y - interval.x) / f32(STEPS);

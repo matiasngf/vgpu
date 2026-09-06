@@ -1,8 +1,10 @@
-// Sun shadow map: rasterizes the scene from the light's orthographic camera
-// and writes light-space depth (clip z in [0, 1]) into an r32float colour
-// attachment, since depth textures cannot be bound for sampling.
+// Key floodlight shadow map: rasterizes the scene from the light's
+// perspective camera and writes the distance to the light into an r32float
+// colour attachment (depth textures cannot be bound for sampling, and a
+// linear distance keeps the bias meaningful under a perspective projection).
 struct Light {
   viewProj: mat4x4f,
+  position: vec3f,
 }
 @group(0) @binding(0) var<uniform> light: Light;
 
@@ -16,16 +18,16 @@ struct VertexIn {
 }
 struct VertexOut {
   @builtin(position) clip: vec4f,
-  @location(0) depth: f32,
+  @location(0) world: vec3f,
 }
 
 @vertex fn vs_main(in: VertexIn) -> VertexOut {
   var out: VertexOut;
   out.clip = light.viewProj * vec4f(in.position, 1.0);
-  out.depth = out.clip.z / out.clip.w;
+  out.world = in.position;
   return out;
 }
 
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4f {
-  return vec4f(in.depth, 0.0, 0.0, 1.0);
+  return vec4f(distance(in.world, light.position), 0.0, 0.0, 1.0);
 }
