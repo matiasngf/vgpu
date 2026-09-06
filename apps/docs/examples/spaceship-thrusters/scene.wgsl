@@ -59,7 +59,10 @@ struct PlumeLight {
 @group(0) @binding(10) var atlasSamp: sampler;
 
 const CONCRETE_TILE = 3.0;   // world units per texture repeat
-const GRAVEL_TILE = 1.5;
+const GRAVEL_TILE = 0.9;
+/** Normal-map strength per ground material (the gravel relief is baked strong; only a little is wanted). */
+const CONCRETE_BUMP = 1.0;
+const GRAVEL_BUMP = 0.35;
 
 struct VertexIn {
   @location(0) position: vec3f,
@@ -127,7 +130,7 @@ fn groundTap(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, uv: vec2f, l
 // Two layers of the same tile, the second rotated and rescaled, blended by a
 // macro mask (the "randomized tiling" trick) so the repeat never lines up;
 // then the tangent normal is applied on the world XZ frame.
-fn groundMaterial(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, world: vec3f, n: vec3f, tile: f32) -> GroundSample {
+fn groundMaterial(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, world: vec3f, n: vec3f, tile: f32, bump: f32) -> GroundSample {
   let uvA = world.xz / tile;
   let ca = 0.8; let sa = 0.6; // 37 degrees
   let rotB = mat2x2f(ca, sa, -sa, ca);
@@ -142,11 +145,13 @@ fn groundMaterial(colorTex: texture_2d<f32>, normalTex: texture_2d<f32>, world: 
   let b = groundTap(colorTex, normalTex, uvB, clamp(lod - 0.5 * log2(scaleB), 0.0, f32(MAT_LEVELS - 1)), transpose(rotB));
   let color = mix(a[0], b[0], m);
   let nm = mix(a[1], b[1], m);
-  // Tangent frame of the flat ground: +X, +Z, up (nm = x, y, up, cavity).
+  // Tangent frame of the flat ground: +X, +Z, up; `bump` scales the tilt.
+  let tilt = nm.xy * bump;
+  let up = sqrt(max(1.0 - dot(tilt, tilt), 0.0));
   var out: GroundSample;
   out.albedo = color.rgb * 2.0;
   out.roughness = color.a;
-  out.normal = normalize(vec3f(nm.x, nm.z, nm.y));
+  out.normal = normalize(vec3f(tilt.x, up, tilt.y));
   out.cavity = nm.w;
   return out;
 }
@@ -165,19 +170,20 @@ fn materialFor(id: u32, world: vec3f, n: vec3f) -> Material {
     case 1u: { return Material(vec3f(0.14, 0.145, 0.15), 0.45, 0.8, n); }    // dark steel housings
     case 2u: { return Material(vec3f(0.42, 0.43, 0.44), 0.32, 0.95, n); }    // stainless lines and valves
     case 3u: {                                                                // concrete pad
-      let g = groundMaterial(concreteColor, concreteNormal, world, n, CONCRETE_TILE);
+      let g = groundMaterial(concreteColor, concreteNormal, world, n, CONCRETE_TILE, CONCRETE_BUMP);
       // Slabs: joints with a bevelled edge, a random tone per slab, and broad
       // damp / weathered patches across several slabs.
       let cell = world.xz / 8.0 + vec2f(0.25, 0.5);
       let toJoint = vec2f(fract(cell.x) - 0.5, fract(cell.y) - 0.5);
       let jointDist = min(abs(toJoint.x), abs(toJoint.y));
-      let joints = 1.0 - 0.3 * (1.0 - smoothstep(0.0, 0.014, jointDist));
-      // Chamfered joint edge, a few centimetres wide, sloping down into the joint.
-      let bevel = (1.0 - smoothstep(0.014, 0.021, jointDist)) * step(0.011, jointDist);
+      // Sawn joints ~4 cm wide with a ~2 cm chamfer sloping into them
+      // (cell = 8 world units, so 0.005 cells = 4 cm).
+      let joints = 1.0 - 0.3 * (1.0 - smoothstep(0.003, 0.0055, jointDist));
+      let bevel = (1.0 - smoothstep(0.005, 0.0075, jointDist)) * step(0.0045, jointDist);
       var normal = g.normal;
       if (bevel > 0.0) {
         let axis = select(vec3f(0.0, 0.0, -sign(toJoint.y)), vec3f(-sign(toJoint.x), 0.0, 0.0), abs(toJoint.x) < abs(toJoint.y));
-        normal = normalize(mix(normal, axis, bevel * 0.3));
+        normal = normalize(mix(normal, axis, bevel * 0.25));
       }
       let slab = floor(cell + 0.5);
       let tone = 0.92 + 0.14 * fract(sin(dot(slab, vec2f(12.9898, 78.233))) * 43758.5453);
@@ -191,7 +197,7 @@ fn materialFor(id: u32, world: vec3f, n: vec3f) -> Material {
       return Material(albedo, clamp(roughness, 0.3, 1.0), 0.0, normal);
     }
     case 4u: {                                                                // gravel apron
-      let g = groundMaterial(gravelColor, gravelNormal, world, n, GRAVEL_TILE);
+      let g = groundMaterial(gravelColor, gravelNormal, world, n, GRAVEL_TILE, GRAVEL_BUMP);
       // Broad colour drift across the apron (wetter and darker in places).
       let patches = textureSampleLevel(detail, detailSamp, world.xz * 0.015 + vec2f(0.1, 0.4), 0.0).r;
       var albedo = vec3f(0.36, 0.32, 0.26) * g.albedo * (0.8 + 0.35 * patches);

@@ -18,10 +18,26 @@ struct Post {
 
 const DISC = 12;
 
-fn hash21(p: vec2f) -> f32 {
-  var q = fract(p * vec2f(123.34, 456.21));
-  q += vec2f(dot(q, q + vec2f(45.32)));
-  return fract(q.x * q.y);
+// Integer hash (lowbias32 over a 3D lattice): no visible structure across
+// the frame, unlike the fract(sin()) family, and cheap to reseed per frame.
+fn hashU(x0: u32) -> u32 {
+  var x = x0;
+  x ^= x >> 16u;
+  x *= 0x7feb352du;
+  x ^= x >> 15u;
+  x *= 0x846ca68bu;
+  x ^= x >> 16u;
+  return x;
+}
+
+fn rand3(p: vec2i, frame: u32, salt: u32) -> f32 {
+  let h = hashU((u32(p.x) * 0x9E3779B1u) ^ (u32(p.y) * 0x85EBCA77u) ^ (frame * 0xC2B2AE3Du) ^ salt);
+  return f32(h & 0xffffffu) / 16777216.0;
+}
+
+// Approximately Gaussian: mean of four uniforms.
+fn gauss(p: vec2i, frame: u32, salt: u32) -> f32 {
+  return (rand3(p, frame, salt) + rand3(p, frame, salt + 1u) + rand3(p, frame, salt + 2u) + rand3(p, frame, salt + 3u)) * 0.5 - 1.0;
 }
 
 fn ign(pixel: vec2f) -> f32 {
@@ -63,16 +79,21 @@ fn softened(uv: vec2f, radius: vec2f, rotation: f32) -> vec3f {
   // Light vignette, kept smooth so it reads as lens falloff, not a frame.
   color *= 1.0 - post.vignette * smoothstep(0.3, 1.15, d);
 
-  // Photographic grain: two hashes averaged for a softer distribution,
-  // stronger in the mids and shadows than in the highlights (silver density),
-  // with a little decorrelated colour so it does not look like monochrome
-  // dither. Changes every frame.
-  let seed = position.xy + vec2f(fract(post.time * 0.731) * 977.0, fract(post.time * 0.317) * 613.0);
+  // Photographic grain, reseeded every frame: a Gaussian luminance grain
+  // that is strongest in the mids and shadows (silver density), plus a
+  // coarser, independent chroma grain in YCbCr that nudges the hue of each
+  // clump the way colour negative's dye clouds do. Applied in display space.
+  let frame = u32(floor(post.time * 60.0));
+  let pixel = vec2i(position.xy);
   let luma = dot(color, vec3f(0.2126, 0.7152, 0.0722));
-  let mono = (hash21(seed) + hash21(seed + vec2f(17.3, 31.7))) * 0.5 - 0.5;
-  let chroma = vec3f(hash21(seed + vec2f(3.1, 5.7)), hash21(seed + vec2f(9.2, 1.3)), hash21(seed + vec2f(21.4, 8.8))) - 0.5;
   let amount = post.grain * mix(1.0, 0.35, smoothstep(0.55, 1.0, luma)) * (0.6 + 0.4 * sqrt(max(luma, 0.0)));
-  color += (vec3f(mono) + chroma * 0.35) * amount;
+  let mono = gauss(pixel, frame, 11u);
+  // Chroma clumps are ~2 px so the colour shifts read as tint, not confetti.
+  let clump = vec2i(floor(position.xy / 2.0));
+  let cb = gauss(clump, frame, 101u);
+  let cr = gauss(clump, frame, 211u);
+  let chroma = vec3f(1.402 * cr, -0.344136 * cb - 0.714136 * cr, 1.772 * cb) * 0.45;
+  color += (vec3f(mono) + chroma) * amount;
 
   return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
 }
