@@ -255,7 +255,12 @@ fn luminance(c: vec3f) -> f32 {
 }
 
 fn fresnelSchlick(cosTheta: f32, f0: vec3f) -> vec3f {
-  return f0 + (vec3f(1.0) - f0) * pow(1.0 - cosTheta, 5.0);
+  // Clamp before the power: a dot product can round to slightly above 1 and
+  // pow() of a negative base is NaN, which the bloom blur then smears into a
+  // black rectangle.
+  let f = clamp(1.0 - cosTheta, 0.0, 1.0);
+  let f2 = f * f;
+  return f0 + (vec3f(1.0) - f0) * (f2 * f2 * f);
 }
 
 fn ggx(n: vec3f, h: vec3f, roughness: f32) -> f32 {
@@ -269,7 +274,10 @@ fn ggx(n: vec3f, h: vec3f, roughness: f32) -> f32 {
 fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   let ndl = max(dot(n, l), 0.0);
   if (ndl <= 0.0) { return vec3f(0.0); }
-  let h = normalize(l + v);
+  // l == -v (light exactly behind the fragment on the view ray) would make
+  // the half vector undefined; fall back to the normal.
+  let lv = l + v;
+  let h = select(n, normalize(lv), dot(lv, lv) > 1e-8);
   let f0 = mix(vec3f(0.04), m.albedo, m.metallic);
   let f = fresnelSchlick(max(dot(h, v), 0.0), f0);
   let d = ggx(n, h, max(m.roughness, 0.05));

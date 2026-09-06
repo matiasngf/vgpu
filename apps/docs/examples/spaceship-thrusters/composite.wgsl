@@ -41,6 +41,13 @@ fn upsampleFire(pixel: vec2f, surfaceDistance: f32) -> vec4f {
 @group(0) @binding(5) var samp: sampler;
 @group(0) @binding(6) var<uniform> composite: Composite;
 
+// NaN/inf guard (exponent all ones); a bad scene or plume texel becomes black
+// instead of poisoning the pixel.
+fn finite(v: vec3f) -> vec3f {
+  let bits = bitcast<vec3u>(v) & vec3u(0x7f800000u);
+  return select(v, vec3f(0.0), bits == vec3u(0x7f800000u));
+}
+
 fn hash21(p: vec2f) -> f32 {
   var q = fract(p * vec2f(123.34, 456.21));
   q += vec2f(dot(q, q + vec2f(45.32)));
@@ -66,7 +73,7 @@ fn hash21(p: vec2f) -> f32 {
   // soft-clips each channel independently: an orange core saturates R first,
   // then G, then B, which is what turns the hottest part of a flame white.
   let plume = upsampleFire(position.xy, surfaceDistance);
-  let radiance = plume.rgb + plume.a * background;
+  let radiance = finite(plume.rgb) + plume.a * finite(background);
   let halation = textureSampleLevel(bloom, samp, uv, 0.0).rgb * vec3f(1.0, 0.85, 0.78);
   let exposed = (radiance + halation * composite.bloomStrength) * composite.exposure;
   var color = vec3f(1.0) - exp(-exposed);
