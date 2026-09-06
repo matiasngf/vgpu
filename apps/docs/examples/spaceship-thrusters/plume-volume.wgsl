@@ -257,8 +257,12 @@ export fn evaluatePlume(
     + DIAMOND_GLOW * (density * machDisk * plume.exitGain * 0.25);
   // The column: bright on the axis (clips white on the sensor), orange at its
   // edge once the soot has warmed it, magenta-white before that.
-  let columnTint = mix(vec3f(0.95, 0.72, 1.0), vec3f(1.0, 0.44, 0.18), warm);
-  let columnGlow = columnTint * (colDensity * (0.5 + 2.2 * colAxial + 1.5 * ridge) * plume.glowGain * 1.7);
+  // Orange only at the rim; the axis is hot enough to clip every channel, so
+  // the column reads as incandescent rather than as a painted orange body.
+  let rimTint = mix(vec3f(0.9, 0.6, 1.0), vec3f(1.0, 0.4, 0.14), warm);
+  let coreTint = mix(vec3f(1.0, 0.85, 1.0), vec3f(1.0, 0.8, 0.55), warm);
+  let columnTint = mix(rimTint, coreTint, colAxial);
+  let columnGlow = columnTint * (colDensity * (0.3 + 2.6 * colAxial + 2.6 * ridge) * plume.glowGain * 2.2);
 
   // Exit region: discrete engine jets read as sharp parallel streaks of
   // blue-violet gas, with the first diamonds glowing warm white.
