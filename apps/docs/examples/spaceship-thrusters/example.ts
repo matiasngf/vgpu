@@ -179,7 +179,7 @@ const QUALITY: Record<ThrusterQuality, {
   social: {
     bloomHeight: 480,
     ao: { radius: 1.4, intensity: 3.0, bias: 0.1 },
-    post: { grain: 0.045, vignette: 0.3, edgeBlur: 0.009, edgeStart: 0.5 },
+    post: { grain: 0.06, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
     composite: { vignette: 0, grain: 0 },
   },
 };
