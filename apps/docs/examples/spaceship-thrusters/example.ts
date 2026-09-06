@@ -10,7 +10,7 @@ import fireWgsl from './fire.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
 import { invert, lookAt, multiply, orthographic, pack, perspective, type Vec3 } from './cad';
-import { buildEngine, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand } from './engine';
+import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand, WORK_LIGHT } from './engine';
 
 type Output = Surface | Target;
 
@@ -36,18 +36,24 @@ const PLUME = { nozzle: [0, AXIS_HEIGHT, 0] as Vec3, r0: 0.93, spread: 0.03, len
 const CAMERA = { position: [-10, 15, 10] as Vec3, target: [0.8, 0.8, -1.2] as Vec3, fovDeg: 40, near: 0.5, far: 400 };
 /** Orthographic sun camera covering the stand and the near plume. */
 const SHADOW = { size: 2048, halfExtent: 9, center: [-2.5, 1, 0.5] as Vec3, distance: 60 };
+// Late dusk: a low, warm sun grazing in from behind the stand as a rim light,
+// a dim blue sky, and the plume as the key light.
 const LIGHTING = {
-  sunDir: normalize3([-0.35, 0.72, -0.6]),
-  sunIntensity: 3.8,
-  sunColor: [1.0, 0.96, 0.9],
-  ambient: 0.28,
-  skyColor: [0.6, 0.72, 0.9],
-  groundColor: [0.42, 0.38, 0.33],
+  sunDir: normalize3([0.55, 0.24, -0.7]),
+  sunIntensity: 2.2,
+  sunColor: [1.0, 0.5, 0.25],
+  ambient: 0.2,
+  skyColor: [0.18, 0.28, 0.62],
+  groundColor: [0.1, 0.08, 0.09],
+  fogColor: [0.05, 0.055, 0.1],
+  fogDensity: 0.005,
+  workLight: [...WORK_LIGHT, 130] as [number, number, number, number],
+  workLightColor: [1.0, 0.85, 0.65],
   /** In light-space NDC depth; the span is 4 * halfExtent world units, so this is ~0.03 units. */
   shadowBias: 0.0008,
 };
 /** Segment light that stands in for the plume's glow on the geometry. */
-const PLUME_LIGHT = { length: 32, intensity: 14 };
+const PLUME_LIGHT = { length: 32, intensity: 85 };
 
 interface Effects {
   bakeNoise: Effect;
@@ -231,6 +237,7 @@ function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: str
     ['engine', engineToStand(buildEngine(DEFAULT_ENGINE), AXIS_HEIGHT)],
     ['stand', buildStand(DEFAULT_ENGINE, AXIS_HEIGHT)],
     ['gantry', buildGantry()],
+    ['floodlight', buildFloodlight()],
     ['ground', buildGround()],
   ] as const;
   const meshes: Mesh[] = [];
@@ -269,12 +276,12 @@ function setConstants(effects: Effects, targets: Targets): void {
     detailSamp: effects.repeatSampler,
     plume: { ...PLUME, axis: PLUME_AXIS },
   });
-  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.3, knee: 0.6 } });
+  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
   effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
   effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
   effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
   effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.0, bloomStrength: 0.45, grain: 0.015, time: 0 } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, grain: 0.02, time: 0 } });
 }
 
 function setBindings(effects: Effects, geometry: Geometry, targets: Targets): void {

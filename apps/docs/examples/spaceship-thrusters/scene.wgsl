@@ -19,6 +19,11 @@ struct Lighting {
   shadowBias: f32,
   sunViewProj: mat4x4f,
   shadowExtent: f32,    // world units covered by the shadow map
+  fogColor: vec3f,
+  fogDensity: f32,
+  // A floodlight on a pole by the stand (xyz position, w intensity).
+  workLight: vec4f,
+  workLightColor: vec3f,
 }
 
 // The plume lights the engine and pad as a line segment: the closest point
@@ -112,7 +117,8 @@ fn materialFor(id: u32, world: vec3f) -> Material {
       return Material(vec3f(0.075, 0.08, 0.085) * (0.75 + 0.5 * wear), 0.5 + 0.25 * wear, 0.35);
     }
     case 6u: { return Material(vec3f(0.85, 0.85, 0.82), 0.7, 0.0); }         // white decal
-    default: { return Material(vec3f(0.85, 0.6, 0.08), 0.5, 0.2); }          // safety yellow
+    case 7u: { return Material(vec3f(0.85, 0.6, 0.08), 0.5, 0.2); }          // safety yellow
+    default: { return Material(vec3f(1.0, 0.95, 0.85), 0.3, 0.0); }          // lamp face (emissive, see fs_main)
   }
 }
 
@@ -196,8 +202,23 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     color += shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
   }
 
+  // Work light: a warm floodlight on a pole; simple inverse-square point light.
+  {
+    let toLight = lighting.workLight.xyz - in.world;
+    let dist2 = max(dot(toLight, toLight), 0.5);
+    let l = toLight * inverseSqrt(dist2);
+    color += shade(n, v, l, lighting.workLightColor * (lighting.workLight.w / dist2), m);
+  }
+  // The lamp face itself glows.
+  if (in.material == 8u) { color += vec3f(1.0, 0.9, 0.75) * 6.0; }
+
+  // Dusk haze: distant ground fades toward the sky colour.
+  let viewDistance = distance(camera.position, in.world);
+  let fog = 1.0 - exp(-viewDistance * lighting.fogDensity);
+  color = mix(color, lighting.fogColor, fog);
+
   var out: FragOut;
   out.color = vec4f(color, 1.0);
-  out.depth = vec4f(distance(camera.position, in.world), 0.0, 0.0, 1.0);
+  out.depth = vec4f(viewDistance, 0.0, 0.0, 1.0);
   return out;
 }

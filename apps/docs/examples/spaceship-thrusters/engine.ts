@@ -25,6 +25,7 @@ export const MAT_GRAVEL = 4;
 export const MAT_PAINT = 5;
 export const MAT_DECAL = 6;
 export const MAT_YELLOW = 7;
+export const MAT_LAMP = 8;
 
 export interface EngineParams {
   /** Radius at the throat (narrowest point). 0.25 gives Merlin's expansion ratio of 16. */
@@ -331,6 +332,21 @@ function iBeam(center: Vec3, length: number, height: number, width: number, axis
   merge(mesh, box([center[0], center[1] + flange / 2, center[2]], size(length, flange, width), MAT_PAINT));
   merge(mesh, box([center[0], center[1] + height - flange / 2, center[2]], size(length, flange, width), MAT_PAINT));
   merge(mesh, box([center[0], center[1] + height / 2, center[2]], size(length, height - 2 * flange, web), MAT_PAINT));
+  return mesh;
+}
+
+/** Floodlight on a pole by the stand; `WORK_LIGHT` is where it shines from. */
+export const WORK_LIGHT: Vec3 = [-8.5, 6.5, 7.5];
+
+export function buildFloodlight(): CadMesh {
+  const mesh = emptyMesh();
+  const [x, y, z] = WORK_LIGHT;
+  merge(mesh, box([x, 0.04, z], [0.7, 0.08, 0.7], MAT_PAINT));
+  merge(mesh, transform(cylinder(0.09, 0.07, 0, y + 0.1, 16, MAT_PAINT), translation([x, 0, z])));
+  // Lamp housing angled toward the engine, with the emissive face on the front.
+  const head = compose(translation([x, y, z]), rotationX(0.55), rotationZ(0.35));
+  merge(mesh, transform(box([0, 0, 0], [0.55, 0.42, 0.25], MAT_STEEL), head));
+  merge(mesh, transform(box([0, 0, 0.14], [0.45, 0.32, 0.03], MAT_LAMP), head));
   return mesh;
 }
 
