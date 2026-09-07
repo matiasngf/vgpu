@@ -21,7 +21,7 @@ export interface DreamcoreFrameOptions {
   time?: number;
   /** 1 sample per pixel for live rendering, 4 for stills. */
   samples?: 1 | 4;
-  /** Exact blade shadow rays toward the door and sun; off for a cheaper live frame. */
+  /** Full-quality fur march (56 steps); off halves the steps for a cheaper live frame. */
   grassShadows?: boolean;
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;
@@ -55,8 +55,8 @@ export const LOOK = {
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
   doorLight: 12,
-  /** Blade patch around the door (radius in metres) and blade height. */
-  grass: { radius: 9, height: 0.09 },
+  /** Fur-grass patch around the door (radius in metres) and pile height. */
+  grass: { radius: 9, height: 0.1 },
   post: { exposure: 1, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 

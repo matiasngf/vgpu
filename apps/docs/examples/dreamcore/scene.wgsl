@@ -2,14 +2,14 @@
 // opening there is a sunlit sand dune; as `phase` rises the day pours out of the door and
 // sweeps across the hills.
 //
-// Fullscreen raymarcher: heightfield hills, grid-traced grass blades (flat Bezier ribbons,
-// Kajiya-Kay shading, height ambient occlusion and volumetric light transmittance through the
-// grass layer), an SDF door, a rectangular area light for the door spill, single scattering
-// in the night air, and a second heightfield world (the dune) behind the portal.
+// Fullscreen raymarcher: heightfield hills, a fur-style grass volume (a combed strand
+// density field ray marched with front-to-back compositing, Kajiya-Kay fibre shading, depth
+// occlusion and light transmittance), an SDF door, a rectangular area light for the door
+// spill, single scattering in the night air, and a second heightfield world (the dune)
+// behind the portal.
 //
-// Grass techniques follow Boulanger et al. (lit grass volume with occlusion and shadows),
-// Kajiya & Kay (anisotropic fibre shading), Jahrmann & Wimmer and Sucker Punch's Ghost of
-// Tsushima grass (per-blade Bezier ribbons, normal rounding, height AO, wind).
+// Grass techniques follow Kajiya & Kay (fur as a lit 3D texture, anisotropic fibre shading)
+// and Boulanger et al. (lit grass volume with occlusion and shadows through the layer).
 
 struct Params {
   resolution: vec2f,
@@ -30,9 +30,7 @@ const FRAME_T: f32 = 0.085; // frame member width
 const FRAME_D: f32 = 0.07;  // frame half depth
 const LEAF_D: f32 = 0.022;  // leaf half thickness
 const TMAX: f32 = 170.0;
-const CELL: f32 = 0.25;     // grass grid cell (m); every cell grows eight combed blades
-const BLADES_PER_CELL: i32 = 8;
-const GRASS_DENSITY: f32 = 5.0; // extinction of the grass layer at ground level (1/m)
+
 
 // ---------------------------------------------------------------- utils
 
@@ -283,156 +281,159 @@ fn doorShadow(p: vec3f, l: vec3f, f: DoorFrame, maxT: f32, k: f32) -> f32 {
   return s;
 }
 
-// ---------------------------------------------------------------- grass blades
+// ---------------------------------------------------------------- grass fur volume
 
-// Local blade coverage: clumpy, fading toward the edge of the blade grid where the
-// textured heightfield takes over.
+// The grass is a fur-like volume (Kajiya-Kay style 3D texture): a dense field of thin strands
+// described by a density function inside a slab above the ground, ray marched with
+// front-to-back compositing. Combing shifts the strand pattern with height so strands lie
+// along the comb direction instead of standing up.
+const FUR_COMB: f32 = 2.6;      // horizontal strand drift per metre of height (nearly flat)
+const FUR_SIGMA: f32 = 150.0;   // extinction inside a strand-dense region (1/m)
+
+// Local fur coverage: clumpy, fading toward the edge of the fur patch around the door.
 fn grassCoverage(xz: vec2f) -> f32 {
-  let clump = clamp(0.35 + 1.4 * (fbm3(xz * 0.45 + vec2f(9.0, 4.0)) - 0.3), 0.25, 1.4);
+  let clump = clamp(0.45 + 1.1 * (fbm3(xz * 0.45 + vec2f(9.0, 4.0)) - 0.3), 0.3, 1.25);
   let radius = params.grass.x;
   return clump * (1.0 - smoothstep(radius * 0.55, radius * 0.98, length(xz - params.door.xy)));
 }
 
-struct Blade {
-  p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f,   // spine samples, base to tip
-  side: vec3f,                                   // width direction
-  w0: f32, w1: f32, w2: f32,                     // half widths at the first three samples
-  h: f32,
-  seed: f32,
-}
-
-fn bezier(a: vec3f, c: vec3f, b: vec3f, t: f32) -> vec3f {
-  let s = 1.0 - t;
-  return a * (s * s) + c * (2.0 * s * t) + b * (t * t);
-}
-
-// Comb direction of the flattened grass: a slow flow field with brushed waviness.
+// Comb direction of the flattened grass: a prevailing direction with gentle waves.
 fn combDir(xz: vec2f) -> vec2f {
   let a = PI * 0.78 + 0.7 * (fbm3(xz * 0.07 + vec2f(3.0, 1.0)) - 0.5) + 0.2 * sin(xz.x * 0.9 + xz.y * 0.4);
   return vec2f(sin(a), cos(a));
 }
 
-// Each cell grows several combed blades: flat ribbons lying along the comb direction on a
-// low quadratic-Bezier arc. The base sits at the upwind side of the cell and the blade
-// sweeps across it, so every blade stays inside its own cell and the grid walk is exact.
-fn bladeAt(cell: vec2f, k: f32) -> Blade {
-  var bl: Blade;
-  let s1 = hash12(cell + vec2f(k * 17.3, 0.7));
-  let s2 = hash12(cell + vec2f(3.1, k * 29.7 + 5.3));
-  let s3 = hash12(cell + vec2f(k * 7.7 + 11.1, 23.9));
-  let s4 = hash12(cell + vec2f(41.3, k * 13.1 + 2.2));
-  let center = (cell + vec2f(0.5)) * CELL;
-  let dir = combDir(center);
+struct FurSample {
+  density: f32,
+  strand: f32,   // strand pattern value, for per-strand colour variation
+}
+
+fn furDensity(p: vec3f, dir: vec2f, cover: f32) -> FurSample {
+  var s: FurSample;
+  let h = max(params.grass.y, 0.01);
+  let hf = clamp(p.y / h, 0.0, 1.0);
+  // Combing: the pattern drifts along the comb direction as we go up, so a strand column
+  // becomes a strand lying along `dir`.
+  let q = p.xz - dir * (p.y * FUR_COMB);
+  // Strand pattern stretched along the comb direction: brushed streaks, not speckle.
   let perp = vec2f(-dir.y, dir.x);
-  let base = center - dir * (0.5 * CELL - 0.03) + perp * ((s1 - 0.5) * (CELL - 0.06)) + dir * (s2 * 0.02);
-  let cover = grassCoverage(base);
-  let len = (0.13 + 0.09 * s3) * cover;
-  // Wind: the tips brush sideways a little.
-  let wind = params.grass.w;
-  let t = params.time;
-  let gust = fbm3(base * 0.12 - vec2f(t * 0.35, t * 0.12)) - 0.35;
-  let flutter = sin(t * 2.1 + s1 * 6.28 + base.x * 1.7) * 0.35;
-  let sway = wind * (gust + flutter) * 0.02;
-  let arc = 0.025 + 0.05 * s4;
-  let a = vec3f(base.x, 0.0, base.y);
-  let ctrl = a + vec3f(dir.x * len * 0.3 + perp.x * sway * 0.5, arc, dir.y * len * 0.3 + perp.y * sway * 0.5);
-  let tip = a + vec3f(dir.x * len + perp.x * sway, 0.008, dir.y * len + perp.y * sway);
-  bl.p0 = a;
-  bl.p1 = bezier(a, ctrl, tip, 0.34);
-  bl.p2 = bezier(a, ctrl, tip, 0.68);
-  bl.p3 = tip;
-  bl.side = vec3f(perp.x, 0.0, perp.y);
-  let w = 0.0028 + 0.0014 * s1;
-  bl.w0 = w;
-  bl.w1 = w * 0.85;
-  bl.w2 = w * 0.55;
-  bl.h = len;
-  bl.seed = s3 * 0.6 + s4 * 0.4;
-  return bl;
+  let u = vec2f(dot(q, dir) * 0.3, dot(q, perp));
+  let strand = vnoise(u * 125.0) * 0.65 + vnoise(u * 250.0 + vec2f(7.3, 2.1)) * 0.35;
+  let lenVar = 0.55 + 0.45 * vnoise(q * 14.0 + vec2f(3.0, 5.0));
+  let d = strand * lenVar * cover - hf * 0.85;
+  s.density = clamp(d * 6.0, 0.0, 1.0);
+  s.strand = strand;
+  return s;
 }
 
-// Moller-Trumbore, two-sided. Returns (t, u, v) with t < 0 on miss.
-fn iTriangle(ro: vec3f, rd: vec3f, v0: vec3f, v1: vec3f, v2: vec3f) -> vec3f {
-  let e1 = v1 - v0;
-  let e2 = v2 - v0;
-  let pv = cross(rd, e2);
-  let det = dot(e1, pv);
-  if (abs(det) < 1e-9) { return vec3f(-1.0, 0.0, 0.0); }
-  let inv = 1.0 / det;
-  let tv = ro - v0;
-  let u = dot(tv, pv) * inv;
-  if (u < 0.0 || u > 1.0) { return vec3f(-1.0, 0.0, 0.0); }
-  let qv = cross(tv, e1);
-  let v = dot(rd, qv) * inv;
-  if (v < 0.0 || u + v > 1.0) { return vec3f(-1.0, 0.0, 0.0); }
-  return vec3f(dot(e2, qv) * inv, u, v);
+// Light transmittance down into the fur toward a light: strands are densest near the ground.
+fn furTransmittance(hf: f32, l: vec3f, cover: f32) -> f32 {
+  let depth = pow(1.0 - hf, 1.5);
+  return exp(-1.4 * cover * depth / max(l.y, 0.12));
 }
 
-struct SegHit {
-  t: f32,
-  across: f32,   // -1..1 across the blade width
-  along: f32,    // 0..1 along the segment
+struct FurResult {
+  color: vec3f,
+  alpha: f32,
 }
 
-// One ribbon segment between two spine samples as two triangles.
-fn iSegment(ro: vec3f, rd: vec3f, a: vec3f, b: vec3f, side: vec3f, wa: f32, wb: f32) -> SegHit {
-  var res: SegHit;
-  res.t = -1.0;
-  res.across = 0.0;
-  res.along = 0.0;
-  let a0 = a - side * wa;
-  let a1 = a + side * wa;
-  let b0 = b - side * wb;
-  let b1 = b + side * wb;
-  let h1 = iTriangle(ro, rd, a0, a1, b1);
-  if (h1.x > 0.0) {
-    res.t = h1.x;
-    // a0 -> (u=0,v=0), a1 -> u, b1 -> v
-    res.along = h1.z;
-    res.across = (h1.y + h1.z) * 2.0 - 1.0;
-    return res;
+fn furAlbedo(hf: f32, strand: f32) -> vec3f {
+  let base = rgb8(46.0, 82.0, 26.0);
+  let tip = rgb8(150.0, 176.0, 66.0);
+  var albedo = mix(base, tip, smoothstep(0.0, 1.0, hf));
+  albedo *= 0.8 + 0.4 * strand;
+  return albedo;
+}
+
+// March the fur slab between tEnter and tExit along the ray and composite front to back.
+fn furMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, f: DoorFrame, dayMix: f32, rim: f32) -> FurResult {
+  var res: FurResult;
+  res.color = vec3f(0.0);
+  res.alpha = 0.0;
+  if (tExit <= tEnter) { return res; }
+  let steps = select(28, 56, params.grass.z > 0.5);
+  let dt = (tExit - tEnter) / f32(steps);
+  let h = max(params.grass.y, 0.01);
+  // Per-ray constants: the comb field and coverage vary slowly, so sample them once at the
+  // ground point; shadows from the door are evaluated once as well.
+  let pg = ro + rd * tExit;
+  let cover = grassCoverage(pg.xz);
+  if (cover < 0.01) { return res; }
+  let dir = combDir(pg.xz);
+  let tangent = normalize(vec3f(dir.x * FUR_COMB, 1.0, dir.y * FUR_COMB));
+  let sun = sunDir();
+  let sunCol = sunColor();
+  let v = -rd;
+  let sunSh = doorShadow(pg + vec3f(0.0, 0.05, 0.0), sun, f, 8.0, 5.0) * terrainShadow(pg, sun);
+  let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
+  let toDoorC = doorCenter - pg;
+  let doorSh = doorShadow(pg + vec3f(0.0, 0.04, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.3, 12.0);
+  // Kajiya-Kay terms depend only on directions, so they are per ray.
+  let tlSun = dot(tangent, sun);
+  let kkSun = sqrt(max(1.0 - tlSun * tlSun, 0.0));
+  let hSun = normalize(sun + v);
+  let thSun = dot(tangent, hSun);
+  let specSun = pow(sqrt(max(1.0 - thSun * thSun, 0.0)), 18.0) * 0.12;
+  let moon = moonDir();
+  let tlMoon = dot(tangent, moon);
+  let kkMoon = sqrt(max(1.0 - tlMoon * tlMoon, 0.0));
+
+  var T = 1.0;
+  var col = vec3f(0.0);
+  for (var i = 0; i < steps; i++) {
+    let t = tEnter + (f32(i) + 0.5) * dt;
+    let p = ro + rd * t;
+    let fs = furDensity(p, dir, cover);
+    if (fs.density < 0.002) { continue; }
+    let hf = clamp(p.y / h, 0.0, 1.0);
+    let albedo = furAlbedo(hf, fs.strand);
+    let ao = 0.25 + 0.75 * hf;
+    // Day: sun through the fur plus sky ambient, occluded with depth.
+    var day = albedo * (sunCol * kkSun * furTransmittance(hf, sun, cover) * sunSh + AMBIENT * ao);
+    day += sunCol * specSun * furTransmittance(hf, sun, cover) * sunSh * albedo * 2.0;
+    // Night: moon fill and the door light.
+    let lumA = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
+    let nightAlbedo = mix(albedo, lumA * vec3f(0.65, 0.85, 1.0), 0.4);
+    var night = nightAlbedo * (vec3f(0.28, 0.4, 0.68) * 0.16 * kkMoon * furTransmittance(hf, moon, cover) + vec3f(0.006, 0.01, 0.026) * ao);
+    if (dayMix < 0.999) {
+      var e = 0.0;
+      var spec = 0.0;
+      for (var j = 0; j < 3; j++) {
+        let o = DOOR_SAMPLES[j];
+        let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
+        let toL = s - p;
+        let d = max(length(toL), 0.05);
+        let l = toL / d;
+        let facing = max(dot(f.fwd, l), 0.0);
+        let geom = facing / (d * d + 0.6);
+        let tl = dot(tangent, l);
+        let kk = sqrt(max(1.0 - tl * tl, 0.0));
+        let tr = furTransmittance(hf, l, cover);
+        e += geom * (0.35 + 0.65 * kk) * tr;
+        let hl = normalize(l + v);
+        let th = dot(tangent, hl);
+        spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 14.0) * tr;
+      }
+      let front = dot(p - f.origin, f.fwd);
+      let inFront = select(0.0, 1.0, front < -0.01);
+      night += albedo * DOOR_COLOR * params.look.w * (e * 0.333 + spec * 0.08) * doorSh * inFront;
+    }
+    var sampleCol = mix(night, day, dayMix) + albedo * rimGlow(vec3f(0.0, 1.0, 0.0), rim);
+    let a = 1.0 - exp(-fs.density * FUR_SIGMA * dt);
+    col += T * a * sampleCol;
+    T *= 1.0 - a;
+    if (T < 0.02) { break; }
   }
-  let h2 = iTriangle(ro, rd, a0, b1, b0);
-  if (h2.x > 0.0) {
-    res.t = h2.x;
-    res.along = h2.y + h2.z;
-    res.across = h2.y * 2.0 - 1.0;
-  }
+  res.color = col;
+  res.alpha = 1.0 - T;
   return res;
 }
 
-struct BladeHit {
-  t: f32,
-  n: vec3f,      // rounded shading normal
-  tangent: vec3f,
-  up: f32,       // 0 at the base, 1 at the tip
-  seed: f32,
-}
-
-fn testBlade(ro: vec3f, rd: vec3f, bl: Blade, best: f32) -> vec4f {
-  // Returns (t, across, along+segment, segment) of the nearest hit below `best`, or t < 0.
-  var out = vec4f(-1.0);
-  let s0 = iSegment(ro, rd, bl.p0, bl.p1, bl.side, bl.w0, bl.w1);
-  if (s0.t > 0.0 && s0.t < best) { out = vec4f(s0.t, s0.across, s0.along, 0.0); }
-  let s1 = iSegment(ro, rd, bl.p1, bl.p2, bl.side, bl.w1, bl.w2);
-  if (s1.t > 0.0 && (out.x < 0.0 || s1.t < out.x) && s1.t < best) { out = vec4f(s1.t, s1.across, s1.along, 1.0); }
-  let s2 = iSegment(ro, rd, bl.p2, bl.p3, bl.side, bl.w2, 0.0004);
-  if (s2.t > 0.0 && (out.x < 0.0 || s2.t < out.x) && s2.t < best) { out = vec4f(s2.t, s2.across, s2.along, 2.0); }
-  return out;
-}
-
-// Walks the blade grid along the ray (2D DDA over x/z cells) while the ray is inside the
-// blade slab and radius. Exact ray/triangle hits; nearest wins.
-fn traceBlades(ro: vec3f, rd: vec3f, tMin: f32, tMax: f32, maxCells: i32) -> BladeHit {
-  var res: BladeHit;
-  res.t = -1.0;
-  res.n = vec3f(0.0, 1.0, 0.0);
-  res.tangent = vec3f(0.0, 1.0, 0.0);
-  res.up = 0.0;
-  res.seed = 0.0;
+// Ray/slab interval for the fur layer (y in [0, height]) restricted to the fur patch radius.
+fn furInterval(ro: vec3f, rd: vec3f, tMax: f32) -> vec2f {
   let hMax = params.grass.y;
   let radius = params.grass.x;
-  var t0 = tMin;
+  var t0 = 0.0;
   var t1 = tMax;
   if (abs(rd.y) > 1e-6) {
     let ta = (0.0 - ro.y) / rd.y;
@@ -440,7 +441,7 @@ fn traceBlades(ro: vec3f, rd: vec3f, tMin: f32, tMax: f32, maxCells: i32) -> Bla
     t0 = max(t0, min(ta, tb));
     t1 = min(t1, max(ta, tb));
   } else if (ro.y < 0.0 || ro.y > hMax) {
-    return res;
+    return vec2f(1.0, 0.0);
   }
   let a2 = dot(rd.xz, rd.xz);
   if (a2 > 1e-8) {
@@ -448,93 +449,12 @@ fn traceBlades(ro: vec3f, rd: vec3f, tMin: f32, tMax: f32, maxCells: i32) -> Bla
     let b2 = dot(oc, rd.xz);
     let c2 = dot(oc, oc) - radius * radius;
     let disc = b2 * b2 - a2 * c2;
-    if (disc < 0.0) { return res; }
+    if (disc < 0.0) { return vec2f(1.0, 0.0); }
     let sq = sqrt(disc);
     t0 = max(t0, (-b2 - sq) / a2);
     t1 = min(t1, (-b2 + sq) / a2);
   }
-  if (t1 <= t0) { return res; }
-  let start = ro + rd * (t0 + 1e-4);
-  var cell = floor(start.xz / CELL);
-  let stepDir = vec2f(select(-1.0, 1.0, rd.x >= 0.0), select(-1.0, 1.0, rd.z >= 0.0));
-  let safeDir = vec2f(select(rd.x, 1e-6, abs(rd.x) < 1e-6), select(rd.z, 1e-6, abs(rd.z) < 1e-6));
-  let invDir = vec2f(1.0) / safeDir;
-  let tDelta = abs(CELL * invDir);
-  let nextBoundary = (cell + max(stepDir, vec2f(0.0))) * CELL;
-  var tNext = (nextBoundary - ro.xz) * invDir;
-  var best = t1;
-  var bestCell = cell;
-  var bestK = -1.0;
-  var bestHit = vec4f(0.0);
-  for (var i = 0; i < maxCells; i++) {
-    let tExit = min(tNext.x, tNext.y);
-    for (var k = 0; k < BLADES_PER_CELL; k++) {
-      let bl = bladeAt(cell, f32(k));
-      if (bl.h > 0.004) {
-        let hit = testBlade(ro, rd, bl, best);
-        if (hit.x > t0 - 0.02 && hit.x < best) {
-          best = hit.x;
-          bestCell = cell;
-          bestK = f32(k);
-          bestHit = hit;
-        }
-      }
-    }
-    if (tExit >= best) { break; }
-    if (tNext.x < tNext.y) {
-      cell.x += stepDir.x;
-      tNext.x += tDelta.x;
-    } else {
-      cell.y += stepDir.y;
-      tNext.y += tDelta.y;
-    }
-  }
-  if (bestK < 0.0) { return res; }
-  let bl = bladeAt(bestCell, bestK);
-  var a = bl.p0;
-  var b = bl.p1;
-  if (bestHit.w > 1.5) { a = bl.p2; b = bl.p3; } else if (bestHit.w > 0.5) { a = bl.p1; b = bl.p2; }
-  let tangent = normalize(b - a);
-  let faceN = normalize(cross(tangent, bl.side));
-  // Normal rounding (Ghost of Tsushima): tilt the normal outward across the width so the
-  // flat ribbon shades like a curved blade.
-  let n = normalize(faceN + bl.side * bestHit.y * 0.7);
-  res.t = best;
-  res.n = n;
-  res.tangent = tangent;
-  res.up = clamp((bestHit.w + bestHit.z) / 3.0, 0.0, 1.0);
-  res.seed = bl.seed;
-  return res;
-}
-
-// Light transmittance through the grass layer (Boulanger-style lit volume): the layer is
-// densest at the ground and thins toward the tips, so light reaches tips first.
-fn grassTransmittance(p: vec3f, l: vec3f) -> f32 {
-  let hMax = params.grass.y;
-  if (p.y >= hMax - 0.002) { return 1.0; }
-  let cover = grassCoverage(p.xz);
-  if (cover < 0.01) { return 1.0; }
-  var len = 1.2;
-  if (l.y > 0.02) { len = min((hMax - p.y) / l.y, 1.2); }
-  var od = 0.0;
-  for (var i = 0; i < 4; i++) {
-    let s = (f32(i) + 0.5) * 0.25;
-    let y = clamp((p.y + l.y * len * s) / hMax, 0.0, 1.0);
-    od += (1.0 - y) * (1.0 - y);
-  }
-  od *= GRASS_DENSITY * cover * len * 0.25;
-  return exp(-od);
-}
-
-// Blade occlusion toward a light: the smooth volumetric term, optionally sharpened by an
-// exact blade hit (blades are thin and translucent, so a hit only dims).
-fn bladeShadow(p: vec3f, l: vec3f, maxT: f32, maxCells: i32) -> f32 {
-  var s = grassTransmittance(p, l);
-  if (params.grass.z > 0.5 && s > 0.02) {
-    let hit = traceBlades(p, l, 0.003, maxT, maxCells);
-    s *= select(1.0, 0.45, hit.t > 0.0);
-  }
-  return s;
+  return vec2f(t0, t1);
 }
 
 // ---------------------------------------------------------------- portal + sand world
@@ -724,7 +644,6 @@ fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shad
     var vis = 1.0;
     if (shadows) {
       vis = doorShadow(p + n * 0.002, l, f, d - 0.3, 12.0);
-      if (vis > 0.01) { vis *= bladeShadow(p + n * 0.007 + l * 0.01, l, d - 0.02, 56); }
     }
     sum += geom * diffuse * vis;
   }
@@ -846,7 +765,7 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
   let sunCol = sunColor();
   let ndl = max(dot(n, sun), 0.0);
   var sh = terrainShadow(p, sun) * doorShadow(p, sun, f, 8.0, 5.0);
-  sh *= bladeShadow(p + n * 0.003, sun, 0.8, 24);
+  sh *= furTransmittance(0.0, sun, cover);
   let hemi = 0.5 + 0.5 * n.y;
   var day = albedo * (sunCol * ndl * sh + AMBIENT * hemi * ao);
   let h = normalize(sun + v);
@@ -855,40 +774,7 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
   // --- Night: moon fill + the door spill.
   var night = nightBase(albedo, n) * ao;
   if (dayMix < 0.999) {
-    night += mix(albedo, vec3f(dot(albedo, vec3f(0.33))), 0.2) * doorLight(p, n, vec3f(0.0), 0.0, f, true);
-  }
-  return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
-}
-
-fn shadeBlade(p: vec3f, hit: BladeHit, rd: vec3f, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
-  // Darker, bluer base fading to a lighter yellow-green tip; each blade gets its own tint.
-  let base = rgb8(58.0, 98.0, 32.0);
-  let tip = rgb8(152.0, 178.0, 70.0);
-  var albedo = mix(base, tip, smoothstep(0.1, 1.0, hit.up));
-  albedo *= 0.75 + 0.5 * hit.seed;
-  albedo *= mix(vec3f(1.0), vec3f(1.12, 1.0, 0.8), hit.seed * 0.5);
-  var n = hit.n;
-  let v = -rd;
-  if (dot(n, v) < 0.0) { n = -n; }
-  // Height ambient occlusion: the combed layer is thin, so only the ground contact darkens.
-  let ao = mix(0.55, 1.0, clamp(p.y / max(params.grass.y, 0.01), 0.0, 1.0));
-  let sun = sunDir();
-  let sunCol = sunColor();
-  let ndl = dot(n, sun);
-  let sh = doorShadow(p + n * 0.003, sun, f, 8.0, 5.0) * bladeShadow(p + n * 0.007 + sun * 0.01, sun, 0.9, 28);
-  let hemi = 0.5 + 0.5 * n.y;
-  // Diffuse plus transmission, blended with Kajiya-Kay fibre diffuse, and a fibre highlight.
-  let tl = dot(hit.tangent, sun);
-  let fibreDiff = sqrt(max(1.0 - tl * tl, 0.0));
-  let lambert = max(ndl, 0.0) + 0.45 * max(-ndl, 0.0);
-  var day = albedo * (sunCol * mix(lambert, fibreDiff, 0.4) * sh + AMBIENT * hemi * 1.2 * ao);
-  let hv = normalize(sun + v);
-  let th = dot(hit.tangent, hv);
-  day += pow(sqrt(max(1.0 - th * th, 0.0)), 28.0) * 0.10 * sh * sunCol;
-
-  var night = nightBase(albedo, n) * 1.3 * ao;
-  if (dayMix < 0.999) {
-    night += albedo * doorLight(p, n, hit.tangent, 0.9, f, true);
+    night += mix(albedo, vec3f(dot(albedo, vec3f(0.33))), 0.2) * doorLight(p, n, vec3f(0.0), 0.0, f, true) * furTransmittance(0.0, normalize(f.origin + vec3f(0.0, 1.0, 0.0) - p), cover);
   }
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
@@ -925,14 +811,11 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
   let tTerrain = marchTerrain(ro, rd, 0.0, TMAX);
   var tLimit = select(tTerrain, TMAX, tTerrain < 0.0);
   let tDoor = marchDoor(ro, rd, tLimit, f);
-  if (tDoor > 0.0) { tLimit = min(tLimit, tDoor); }
-  let blade = traceBlades(ro, rd, 0.0, tLimit, 240);
 
   var t = tTerrain;
-  var kind = 0;   // 0 sky, 1 terrain, 2 door, 3 blade
+  var kind = 0;   // 0 sky, 1 terrain, 2 door
   if (t > 0.0) { kind = 1; }
   if (tDoor > 0.0 && (t < 0.0 || tDoor < t)) { t = tDoor; kind = 2; }
-  if (blade.t > 0.0 && (t < 0.0 || blade.t < t)) { t = blade.t; kind = 3; }
   let throughDoor = tPortal > 0.0 && (t < 0.0 || tPortal < t);
 
   var color = vec3f(0.0);
@@ -943,6 +826,7 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
     return renderSand(vec3f(q.x, q.y, 0.0), normalize(ld), pixelAngle);
   }
   var dayMix = 1.0;
+  var rim = 0.0;
   if (kind == 0) {
     let far = ro + rd * 120.0;
     let front = dayFront(far, f);
@@ -954,16 +838,20 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
     let p = ro + rd * t;
     let front = dayFront(p, f);
     dayMix = front.x;
-    let rim = front.y;
+    rim = front.y;
     let footprint = pixelAngle * t;
-    if (kind == 3) {
-      color = shadeBlade(p, blade, rd, f, dayMix, rim);
-    } else if (kind == 2) {
+    if (kind == 2) {
       let n = doorNormal(p, f);
       color = shadeDoor(p, n, rd, f, dayMix, rim);
     } else {
       let n = terrainNormal(p, max(0.08, footprint * 0.5));
       color = shadeGround(p, n, rd, t, footprint, f, dayMix, rim);
+    }
+    // The grass fur volume sits on the ground in front of whatever was hit.
+    let iv = furInterval(ro, rd, t);
+    if (iv.y > iv.x) {
+      let fur = furMarch(ro, rd, iv.x, iv.y, f, dayMix, rim);
+      color = fur.color + color * (1.0 - fur.alpha);
     }
     // Aerial perspective: night haze is heavier than the crisp day.
     let fogNight = skyNight(vec3f(rd.x, 0.02, rd.z)) * 0.9;
