@@ -104,6 +104,7 @@ const PLUME_LIGHT = { length: 32, intensity: 85 };
 
 interface Effects {
   quality: ThrusterQuality;
+  plumeMode: PlumeMode;
   bakeNoise: Effect;
   bakeDetail: Effect;
   /** Ground materials: height + masks, then normal / albedo / roughness, once per material. */
@@ -178,20 +179,25 @@ const MATERIAL_ATLAS: [number, number] = [1368, 1026];
 /** 16 x 16 slices of (64 + 2 border)². Must match plume-volume.wgsl. */
 const PLUME_GRID_SIZE = (64 + 2) * 16;
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
-const FIRE_SCALE = 0.5; // the plume is soft; the composite upsamples it depth-aware
 /**
  * 'grid': evaluate the volume once per frame into the plume grid and march
  *         two fetches per step (cost independent of resolution and steps).
  * 'direct': evaluate the volume at every march step (cheaper at low
  *         resolution; see `profile` to compare on your GPU).
  */
-export const PLUME_MODE: 'grid' | 'direct' = 'grid';
+export type PlumeMode = 'grid' | 'direct';
+/** Plume mode of the interactive pipeline (the social variant marches directly, see QUALITY). */
+export const PLUME_MODE: PlumeMode = 'grid';
 /** Fresh-sample weight in the temporal resolve (1 = no history blending). */
 const TEMPORAL_BLEND = 0.75;
 /** How much a stale 2x2 phase leans on its block's fresh sample each frame. */
 const TEMPORAL_NEIGHBOR = 0.3;
 /** Per-variant knobs. Everything not listed here is shared between the two pipelines. */
 const QUALITY: Record<ThrusterQuality, {
+  /** Grid: evaluate once per frame into the plume atlas. Direct: evaluate at every march step (keeps the fibre micro-detail). */
+  plume: PlumeMode;
+  /** Plume history resolution relative to the frame; the composite upsamples it depth-aware. */
+  fireScale: number;
   bloomHeight: number;
   /** Screen-space ambient occlusion on the geometry (world-space radius in nozzle radii). */
   ao: { radius: number; intensity: number; bias: number } | null;
@@ -200,8 +206,10 @@ const QUALITY: Record<ThrusterQuality, {
   /** Composite-side vignette and grain (the social variant moves both to the post pass). */
   composite: { vignette: number; grain: number };
 }> = {
-  fast: { bloomHeight: 240, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
+  fast: { plume: PLUME_MODE, fireScale: 0.5, bloomHeight: 240, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
   social: {
+    plume: 'direct',
+    fireScale: 1.0,
     bloomHeight: 480,
     ao: { radius: 2.0, intensity: 4.5, bias: 0.08 },
     post: { grain: 0.085, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
@@ -347,7 +355,7 @@ export async function profile(gpu: Gpu, target: Target, frames = 20, time = 6.2,
   const stages: Record<ProfileStage, (frame: Frame) => void> = {
     scene: (frame) => frame.pass({ target: targets.scene, clear: [0, 0, 0, 0] }, (pass) => { for (const draw of geometry.draws) pass.draw(draw); }),
     ao: (frame) => renderOcclusion(frame, effects, targets),
-    grid: (frame) => { if (PLUME_MODE === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid)); },
+    grid: (frame) => { if (effects.plumeMode === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid)); },
     fire: (frame) => {
       frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
       frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
@@ -432,6 +440,7 @@ function createEffects(gpu: Gpu, label: string, quality: ThrusterQuality): Effec
   const variant = QUALITY[quality];
   return {
     quality,
+    plumeMode: variant.plume,
     bakeNoise: gpu.effect(bakeNoiseWgsl, { label: `${label}-bake-noise` }),
     bakeDetail: gpu.effect(bakeDetailWgsl, { label: `${label}-bake-detail` }),
     bakeConcreteHeight: gpu.effect(bakeMaterialHeightWgsl, { label: `${label}-bake-concrete-height` }),
@@ -441,7 +450,7 @@ function createEffects(gpu: Gpu, label: string, quality: ThrusterQuality): Effec
     bakeGravel: gpu.effect(bakeMaterialFinishWgsl, { label: `${label}-bake-gravel` }),
     bakeGravelAtlas: gpu.effect(bakeMaterialAtlasWgsl, { label: `${label}-bake-gravel-atlas` }),
     grid: gpu.effect(gridWgsl, { label: `${label}-grid` }),
-    fire: gpu.effect(PLUME_MODE === 'grid' ? fireWgsl : fireDirectWgsl, { label: `${label}-fire` }),
+    fire: gpu.effect(variant.plume === 'grid' ? fireWgsl : fireDirectWgsl, { label: `${label}-fire` }),
     resolve: gpu.effect(resolveWgsl, { label: `${label}-resolve` }),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Each blur pass owns its uniform buffer so the encoded direction/radius stay distinct.
@@ -482,8 +491,8 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string,
     } : {}),
     ...(variant.post ? { ldr: gpu.target({ size: full, format: 'rgba8unorm', label: `${label}-ldr` }) } : {}),
     plumeGrid: gpu.target({ size: [PLUME_GRID_SIZE, PLUME_GRID_SIZE], format: HDR_FORMAT, label: `${label}-plume-grid` }),
-    march: gpu.target({ size: marchSize(full), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-march` }),
-    fireHistory: createHistory(gpu, full, label),
+    march: gpu.target({ size: marchSize(full, variant.fireScale), colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-march` }),
+    fireHistory: createHistory(gpu, full, label, variant.fireScale),
     bloomA: gpu.target({ size: bloom, format: HDR_FORMAT, label: `${label}-bloom-a` }),
     bloomB: gpu.target({ size: bloom, format: HDR_FORMAT, label: `${label}-bloom-b` }),
   };
@@ -550,7 +559,7 @@ function setConstants(effects: Effects, targets: Targets): void {
     detailSamp: effects.repeatSampler,
     plume,
   });
-  if (PLUME_MODE === 'grid') effects.fire.set({ plumeGrid: targets.plumeGrid, gridSamp: effects.clampSampler });
+  if (effects.plumeMode === 'grid') effects.fire.set({ plumeGrid: targets.plumeGrid, gridSamp: effects.clampSampler });
   else effects.fire.set({ atlas: targets.noiseAtlas, atlasSamp: effects.clampSampler });
   effects.resolve.set({ resolve: { phase: 0, blend: TEMPORAL_BLEND, neighbor: TEMPORAL_NEIGHBOR } });
   effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
@@ -621,8 +630,8 @@ function sub3(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
-function createHistory(gpu: Gpu, full: readonly [number, number], label: string): PingPongTargets {
-  const [width, height] = fireSize(full);
+function createHistory(gpu: Gpu, full: readonly [number, number], label: string, scale: number): PingPongTargets {
+  const [width, height] = fireSize(full, scale);
   return gpu.pingPong(width, height, { colors: [{ format: HDR_FORMAT }, { format: HDR_FORMAT }], label: `${label}-fire-history` });
 }
 
@@ -696,7 +705,7 @@ function renderChain(frame: Frame, effects: Effects, geometry: Geometry, targets
   // Plume: evaluate the volume once into the grid, march one phase at quarter
   // resolution over it, interleave that into the half-resolution history, then
   // everything downstream reads the history.
-  if (PLUME_MODE === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid));
+  if (effects.plumeMode === 'grid') frame.pass({ target: targets.plumeGrid, clear: false }, (pass) => pass.draw(effects.grid));
   frame.pass({ target: targets.march, clear: CLEAR }, (pass) => pass.draw(effects.fire));
   frame.pass({ target: targets.fireHistory.write, clear: CLEAR }, (pass) => pass.draw(effects.resolve));
   targets.fireHistory.swap();
@@ -731,10 +740,11 @@ function resizeTargets(gpu: Gpu, targets: Targets, size: readonly [number, numbe
   const full = normalizeSize(size);
   targets.scene.resize(full);
   for (const target of [targets.ao, targets.aoBlur, targets.sceneLit, targets.ldr]) target?.resize(full);
-  targets.march.resize(marchSize(full));
+  const scale = QUALITY[RENDER_QUALITY].fireScale;
+  targets.march.resize(marchSize(full, scale));
   // Ping-pong targets do not resize: rebuild the history at the new size.
   destroyHistory(targets.fireHistory);
-  targets.fireHistory = createHistory(gpu, full, 'thrusters-live');
+  targets.fireHistory = createHistory(gpu, full, 'thrusters-live', scale);
   const bloom = bloomSize(full, QUALITY[RENDER_QUALITY].bloomHeight);
   targets.bloomA.resize(bloom);
   targets.bloomB.resize(bloom);
@@ -744,13 +754,13 @@ function normalizeSize(size: readonly [number, number]): [number, number] {
   return [Math.max(1, Math.floor(size[0])), Math.max(1, Math.floor(size[1]))];
 }
 
-function fireSize(size: readonly [number, number]): [number, number] {
-  return [Math.max(1, Math.round(size[0] * FIRE_SCALE)), Math.max(1, Math.round(size[1] * FIRE_SCALE))];
+function fireSize(size: readonly [number, number], scale: number): [number, number] {
+  return [Math.max(1, Math.round(size[0] * scale)), Math.max(1, Math.round(size[1] * scale))];
 }
 
 /** Quarter of the history: one 2x2 phase per frame. */
-function marchSize(size: readonly [number, number]): [number, number] {
-  const history = fireSize(size);
+function marchSize(size: readonly [number, number], scale: number): [number, number] {
+  const history = fireSize(size, scale);
   return [Math.max(1, Math.ceil(history[0] / 2)), Math.max(1, Math.ceil(history[1] / 2))];
 }
 

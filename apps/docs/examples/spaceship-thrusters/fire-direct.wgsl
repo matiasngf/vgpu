@@ -47,7 +47,7 @@ struct FireOut {
   @location(1) aux: vec4f,
 }
 
-const STEPS: i32 = 24;
+const STEPS: i32 = 48;
 
 fn cameraRay(ndc: vec2f) -> vec3f {
   let nearPoint = camera.invViewProj * vec4f(ndc, 0.0, 1.0);

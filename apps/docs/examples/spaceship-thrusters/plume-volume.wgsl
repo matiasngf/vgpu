@@ -214,7 +214,7 @@ export fn evaluatePlume(
   var density = smoothstep(0.0, 0.1 + 0.15 * disperse, shellFire);
   density *= 0.3 + 0.5 * n.g + 1.3 * hairs;
   // Downstream this body becomes the fringe: the tips that fan out and thin.
-  density *= fadeEnd * fireStrength * mix(1.0, 0.3, disperse);
+  density *= fadeEnd * fireStrength * mix(1.0, 0.22, disperse);
 
   // Downstream the fire splits in two (reference: a single-engine night
   // firing): the COLUMN keeps roughly the nozzle width and its opacity and
@@ -223,8 +223,10 @@ export fn evaluatePlume(
   // body as dispersion sets in.
   let columnWorld = plume.r0 * mix(0.9, 1.15, smoothstep(3.5, 16.0, sR));
   let radCol = length(q) / columnWorld;
-  let colShell = 1.0 - radCol + (turb * 0.18 + (filament - 0.45) * 0.22 + (fib2.r - 0.5) * 0.1) * ramp;
-  let colDensity = smoothstep(0.0, 0.12, colShell) * (0.7 + 0.4 * n.g + 0.8 * hairs) * fadeEnd * fireStrength * disperse;
+  // Fibres erode the column's edge and carry most of its density, so the
+  // long hairs and knots of the original fire stay visible inside it.
+  let colShell = 1.0 - radCol + (turb * 0.25 + (filament - 0.45) * 0.38 + (fib2.r - 0.5) * 0.16) * ramp;
+  let colDensity = smoothstep(0.0, 0.1, colShell) * (0.25 + 0.3 * n.g + 1.8 * hairs) * fadeEnd * fireStrength * disperse;
   let colCore = clamp(1.0 - radCol * radCol * 0.6, 0.0, 1.0);
   let colAxial = colCore * colCore;
 
@@ -265,7 +267,9 @@ export fn evaluatePlume(
   let rimTint = mix(vec3f(0.9, 0.6, 1.0), vec3f(1.0, 0.4, 0.14), warm);
   let coreTint = mix(vec3f(1.0, 0.85, 1.0), vec3f(1.0, 0.8, 0.55), warm);
   let columnTint = mix(rimTint, coreTint, colAxial);
-  let columnGlow = columnTint * (colDensity * (0.3 + 2.6 * colAxial + 2.6 * ridge) * plume.glowGain * 2.2);
+  // Only the hair ridges clip; between them the column sits in the mid-tones,
+  // so the fibre structure reads instead of a flat clipped band.
+  let columnGlow = columnTint * (colDensity * (0.05 + 0.9 * colAxial + 5.5 * ridge) * plume.glowGain * 0.55);
 
   // Exit region: discrete engine jets read as sharp parallel streaks of
   // blue-violet gas, with the first diamonds glowing warm white.

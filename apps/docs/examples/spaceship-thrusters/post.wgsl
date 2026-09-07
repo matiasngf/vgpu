@@ -77,7 +77,7 @@ fn softened(uv: vec2f, radius: vec2f, rotation: f32) -> vec3f {
   }
 
   // Light vignette, kept smooth so it reads as lens falloff, not a frame.
-  color *= 1.0 - post.vignette * smoothstep(0.3, 1.15, d);
+  color *= 1.0 - post.vignette * smoothstep(0.6, 1.2, d);
 
   // Photographic grain, reseeded every frame: a Gaussian luminance grain
   // that is strongest in the mids and shadows (silver density), plus a
