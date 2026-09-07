@@ -20,6 +20,7 @@ struct Params {
   look: vec4f,       // sun azimuth (rad), sun elevation (rad), texture strength, door light
   grass: vec4f,      // blade radius (m), blade height (m), blade shadow rays (0/1), wind
   debug: vec4f,      // debug view (0 off, 1 sand world free camera, 2 top-down map), camera xyz
+  dune: vec4f,       // first dune: start (m behind the sill), stoss slope (tan), crest (m), far field level (m)
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -421,18 +422,18 @@ fn duneHeight(p: vec2f) -> f32 {
   let z = p.y;
   // Flat sand level with the field at the threshold, gently undulating further in.
   var h = 0.05 * (fbm3(p * 0.3 + vec2f(7.0, 1.0)) - 0.5) * smoothstep(0.0, 2.0, z);
-  // First dune: a soft toe about 4.5 m in, a 19 degree stoss face, a rounded crest near 2.8 m,
-  // tall enough to fill the opening from standing height so no desert sky shows.
-  let start = 4.5 + 0.8 * sin(p.x * 0.35 + 1.0) + 0.8 * (fbm3(p * 0.15 + vec2f(2.0, 5.0)) - 0.5);
+  // First dune (params.dune): a soft toe `start` metres in, a stoss face of slope `slope`,
+  // a rounded crest at `crest`; tall enough to fill the opening from standing height.
+  let start = params.dune.x + 0.8 * sin(p.x * 0.35 + 1.0) + 0.8 * (fbm3(p * 0.15 + vec2f(2.0, 5.0)) - 0.5);
   let toe = 1.2;
   let rise = z - start;
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let face0 = toe * log(1.0 + exp(-start / toe));
-  let crest = 2.8;
-  h += crest * tanh(0.34 * (face - face0) / crest);
+  let crest = max(params.dune.z, 0.1);
+  h += crest * tanh(params.dune.y * (face - face0) / crest);
   // A low dune field rolls on behind the first crest toward the horizon.
-  let far = smoothstep(9.0, 22.0, z);
-  h += far * (1.1 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + 1.0);
+  let far = smoothstep(params.dune.x + 4.5, params.dune.x + 17.5, z);
+  h += far * (1.1 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + params.dune.w);
   // Small-scale roughness on the slopes only; the flat sand keeps its clean ripples.
   h += 0.08 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 3.0, rise);
   return h;
@@ -449,8 +450,8 @@ fn duneGradient(p: vec2f) -> vec2f {
 // Wind ripples, from the close-up reference: crests about 9 cm apart with a gentle stoss
 // side and a steeper lee side, meandering and pinching off into Y junctions. The sand sun
 // rakes across them so the lee sides cast the wide, soft shadow bands of the photo.
-const RIPPLE_LEN: f32 = 0.40;
-const RIPPLE_AMP: f32 = 0.007;
+const RIPPLE_LEN: f32 = 0.80;
+const RIPPLE_AMP: f32 = 0.012;
 const RIPPLE_DIR: vec2f = vec2f(0.760, 0.650);   // across the crests, roughly along the sand sun
 
 struct Ripples {
@@ -461,7 +462,7 @@ struct Ripples {
 }
 
 fn rippleWarp(p: vec2f) -> f32 {
-  return 12.5 * (fbm3(p * 0.4 + vec2f(1.0, 4.0)) - 0.5) + 3.5 * (fbm3(p * 1.3 + vec2f(6.0, 2.0)) - 0.5);
+  return 12.5 * (fbm3(p * 0.2 + vec2f(1.0, 4.0)) - 0.5) + 3.5 * (fbm3(p * 0.65 + vec2f(6.0, 2.0)) - 0.5);
 }
 
 fn rippleProfile(u: f32) -> f32 {
@@ -479,7 +480,7 @@ fn ripples(p: vec2f, footprint: f32) -> Ripples {
   // Fade the ripples out once a pixel spans a good part of a wavelength, and keep them
   // faint on the smooth sand right behind the threshold (p.y is the door-local z).
   let nearDoor = mix(0.25, 1.0, smoothstep(0.0, 3.5, p.y));
-  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.25 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.02, 0.07, footprint)) * nearDoor;
+  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.12 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.04, 0.14, footprint)) * nearDoor;
   let u = dot(p, RIPPLE_DIR) * k + r.warp;
   r.h = r.amp * rippleProfile(u);
   let e = 0.02;
