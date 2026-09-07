@@ -75,7 +75,7 @@ export const LOOK = {
 export const CYCLE_SECONDS = 16;
 
 /** Default free-camera position (door-local metres) for the sand-world debug view. */
-const DEBUG_CAMERA: readonly [number, number, number] = [-5.5, 2.6, -3.5];
+const DEBUG_CAMERA: readonly [number, number, number] = [-11, 4.5, -7];
 
 export function phaseAt(seconds: number): number {
   const t = ((seconds % CYCLE_SECONDS) + CYCLE_SECONDS) % CYCLE_SECONDS;

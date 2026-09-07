@@ -418,18 +418,22 @@ fn portalHit(ro: vec3f, rd: vec3f, f: DoorFrame) -> f32 {
 // Dune heightfield in door-local space (z grows away from the door). A slip face rises
 // right behind the threshold so the opening is nothing but sand.
 fn duneHeight(p: vec2f) -> f32 {
-  let crestWobble = 0.9 * sin(p.x * 0.55 + 1.0) + 1.4 * (fbm3(p * 0.09 + vec2f(2.0, 5.0)) - 0.5);
-  let start = 0.25 + 0.02 * sin(p.x * 1.3) + crestWobble * 0.12 + 0.06 * (fbm3(p * 0.8 + vec2f(5.0, 5.0)) - 0.5);
-  let rise = p.y - start;
-  // Flat sand at the threshold, a soft toe, then a 31 degree slip face.
-  let toe = 0.35;
+  let z = p.y;
+  // Flat sand level with the field at the threshold, gently undulating further in.
+  var h = 0.05 * (fbm3(p * 0.3 + vec2f(7.0, 1.0)) - 0.5) * smoothstep(0.0, 2.0, z);
+  // First dune: a soft toe about 4.5 m in, a 19 degree stoss face, a rounded crest near 1.9 m.
+  let start = 4.5 + 0.8 * sin(p.x * 0.35 + 1.0) + 0.8 * (fbm3(p * 0.15 + vec2f(2.0, 5.0)) - 0.5);
+  let toe = 1.2;
+  let rise = z - start;
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let face0 = toe * log(1.0 + exp(-start / toe));
-  var h = 0.6 * (face - face0);
-  let swell = 0.15 + 0.85 * smoothstep(0.0, 3.0, rise);
-  h += 1.8 * (fbm3(p * 0.16 + vec2f(7.0, 1.0)) - 0.5) * swell;
-  h += 0.4 * (fbm3(p * 0.42 + vec2f(1.0, 8.0)) - 0.5) * swell;
-  h += 0.18 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 2.0, rise);
+  let crest = 1.9;
+  h += crest * tanh(0.34 * (face - face0) / crest);
+  // A low dune field rolls on behind the first crest toward the horizon.
+  let far = smoothstep(9.0, 22.0, z);
+  h += far * (1.6 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.7 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + 0.4);
+  // Small-scale roughness on the slopes only; the flat sand keeps its clean ripples.
+  h += 0.08 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 3.0, rise);
   return h;
 }
 
@@ -446,7 +450,7 @@ fn duneGradient(p: vec2f) -> vec2f {
 // rakes across them so the lee sides cast the wide, soft shadow bands of the photo.
 const RIPPLE_LEN: f32 = 0.17;
 const RIPPLE_AMP: f32 = 0.0045;
-const RIPPLE_DIR: vec2f = vec2f(0.849, -0.529);  // across the crests (they run up the face diagonally)
+const RIPPLE_DIR: vec2f = vec2f(0.760, 0.650);   // across the crests, roughly along the sand sun
 
 struct Ripples {
   warp: f32,    // phase warp at the shaded point (reused along the shadow walk)
@@ -522,13 +526,21 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   return 0.5 * (a + b);
 }
 
-const SAND_HAZE: vec3f = vec3f(0.60, 0.46, 0.27);   // pale lit sand, for the far dunes
+const SAND_HORIZON: vec3f = vec3f(0.68, 0.60, 0.49);   // warm haze at the desert horizon
+
+// Desert sky seen through the opening: warm haze low, blue above, the low sun glowing.
+fn sandSky(rd: vec3f) -> vec3f {
+  let t = clamp(rd.y, 0.0, 1.0);
+  var col = mix(SAND_HORIZON, vec3f(0.26, 0.42, 0.72), pow(t, 0.55));
+  let s = max(dot(rd, sandSun()), 0.0);
+  col += vec3f(1.0, 0.9, 0.7) * (0.18 * pow(s, 8.0) + 0.5 * pow(s, 200.0));
+  return col;
+}
 
 fn sandSun() -> vec3f {
-  // Low sun from the left, a touch behind the door plane: it rakes across both the flat
-  // threshold and the slip face at a similar grazing angle, so the ripples cast the wide
-  // soft shadow bands of the reference everywhere the opening shows.
-  return normalize(vec3f(-0.9, 0.3, 0.1));
+  // Low sun (12 degrees) from the front left: it rakes across the flat sand so the ripples
+  // cast the wide soft shadow bands of the reference, and lights the dune face beyond.
+  return normalize(vec3f(-0.75, 0.2, -0.55));
 }
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
@@ -564,11 +576,11 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
 fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
   let t = marchDune(ro, rd);
   if (t < 0.0) {
-    return SAND_HAZE;
+    return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0);
   }
   let p = ro + rd * t;
   let col = shadeSand(p, rd, pixelAngle * (tBase + t));
-  return mix(col, SAND_HAZE, 1.0 - exp(-t * 0.012));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-t * 0.02));
 }
 
 // ---------------------------------------------------------------- lighting
@@ -1013,22 +1025,22 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
     let n = doorNormal(p, f);
     return rgb8(86.0, 94.0, 120.0) * (0.35 + 0.65 * max(dot(n, sandSun()), 0.0));
   }
-  if (tDune < 0.0) { return SAND_HAZE; }
+  if (tDune < 0.0) { return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0); }
   let p = ro + rd * tDune;
   let footprint = pixelAngle * tDune;
   var col = shadeSand(p, rd, footprint);
   col = mix(col, vec3f(0.05, 0.05, 0.08), debugGrid(p.xz, footprint) * 0.6);
   col = mix(col, vec3f(0.1, 0.3, 1.0), smoothstep(max(footprint * 2.0, 0.006), 0.0, abs(p.z)) * 0.9);
   col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
-  return mix(col, SAND_HAZE, 1.0 - exp(-tDune * 0.012));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-tDune * 0.02));
 }
 
-// Top-down map of the sand world: x in [-5, 5], z in [-3, 8] (camera side at the bottom),
+// Top-down map of the sand world: x in [-6, 6], z in [-2, 22] (camera side at the bottom),
 // shaded from above with 25 cm contours, the door cut at 1 m height and the same overlays.
 fn renderDebugMap(uv: vec2f) -> vec3f {
-  let x = mix(-5.0, 5.0, uv.x);
-  let z = mix(8.0, -3.0, uv.y);
-  let footprint = 10.0 / params.resolution.x;
+  let x = mix(-6.0, 6.0, uv.x);
+  let z = mix(22.0, -2.0, uv.y);
+  let footprint = 12.0 / params.resolution.x;
   let p2 = vec2f(x, z);
   let h = duneHeight(p2);
   let p = vec3f(x, h, z);
@@ -1077,7 +1089,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
     if (params.debug.x > 0.5) {
       // Free camera in the sand world, looking at the foot of the slip face.
       let cam = params.debug.yzw;
-      let fwdD = normalize(vec3f(0.0, 0.9, 2.0) - cam);
+      let fwdD = normalize(vec3f(0.0, 1.2, 7.0) - cam);
       let rightD = normalize(cross(vec3f(0.0, 1.0, 0.0), fwdD));
       let upD = cross(fwdD, rightD);
       let focalD = 1.0 / tan(0.45);
