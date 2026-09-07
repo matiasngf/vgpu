@@ -301,11 +301,12 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
   let n = m.normal;
 
   // Key floodlight, shadowed by the baked map.
-  var color = floodlight(lighting.keyLight, lighting.keyColor, lighting.keySpot, in.world, n, v, m) * keyVisibility(in.world, geometricNormal);
+  let key = floodlight(lighting.keyLight, lighting.keyColor, lighting.keySpot, in.world, n, v, m) * keyVisibility(in.world, geometricNormal);
+  var color = key;
   // Radiance that screen-space occlusion may darken: the hemisphere ambient
-  // fully, and the plume and fill light partly (both are wide sources whose
-  // light also comes from the sides, so creases receive less of them).
-  var occludable = vec3f(0.0);
+  // fully, and the lamps and plume partly (all are wide sources whose light
+  // also arrives from the sides, so creases receive less of them).
+  var occludable = key * 0.5;
 
   // Hemisphere ambient: sky from above, warm bounce from the pad below.
   let up = n.y * 0.5 + 0.5;
@@ -328,14 +329,14 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, m: Material) -> vec3f {
     let tint = mix(vec3f(0.55, 0.65, 1.0), vec3f(0.95, 0.6, 1.0), smoothstep(1.0, 8.0, s));
     let glow = shade(n, v, l, tint * (plumeLight.intensity * profile / dist2), m);
     color += glow;
-    occludable += glow * 0.45;
+    occludable += glow * 0.7;
   }
 
   // Fill floodlight on the far side, unshadowed.
   {
     let flood = floodlight(lighting.fillLight, lighting.fillColor, lighting.fillSpot, in.world, n, v, m);
     color += flood;
-    occludable += flood * 0.3;
+    occludable += flood * 0.5;
   }
   // The lamp faces themselves glow.
   if (in.material == 8u) { color += vec3f(1.0, 0.98, 0.92) * 12.0; }

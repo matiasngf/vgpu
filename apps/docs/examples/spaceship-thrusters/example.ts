@@ -20,7 +20,7 @@ import resolveWgsl from './resolve.wgsl';
 import sceneWgsl from './scene.wgsl';
 import shadowWgsl from './shadow.wgsl';
 import { invert, lookAt, merge, multiply, pack, perspective, type Vec3 } from './cad';
-import { buildEngine, buildFloodlight, buildGantry, buildGround, buildStand, DEFAULT_ENGINE, engineToStand, FILL_LIGHT, KEY_LIGHT } from './engine';
+import { buildEngine, buildGround, buildStand, DEFAULT_ENGINE, engineToStand, FILL_LIGHT, KEY_LIGHT } from './engine';
 
 type Output = Surface | Target;
 
@@ -203,8 +203,8 @@ const QUALITY: Record<ThrusterQuality, {
   fast: { bloomHeight: 240, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
   social: {
     bloomHeight: 480,
-    ao: { radius: 1.4, intensity: 3.0, bias: 0.1 },
-    post: { grain: 0.06, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
+    ao: { radius: 2.0, intensity: 4.5, bias: 0.08 },
+    post: { grain: 0.085, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
     composite: { vignette: 0, grain: 0 },
   },
 };
@@ -489,13 +489,11 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string,
   };
 }
 
-/** Builds the parametric engine, stand and pad and uploads them as three draws. */
+/** Builds the parametric engine, stand and pad and uploads them as draws. Both floodlights shine from off frame, so no fixtures. */
 function createGeometry(gpu: Gpu, effects: Effects, targets: Targets, label: string): Geometry {
   const parts = [
     ['engine', engineToStand(buildEngine(DEFAULT_ENGINE), AXIS_HEIGHT)],
     ['stand', buildStand(DEFAULT_ENGINE, AXIS_HEIGHT)],
-    ['gantry', buildGantry()],
-    ['floodlight', merge(buildFloodlight(KEY_LIGHT, KEY_TARGET), buildFloodlight(FILL_LIGHT, FILL_TARGET))],
     ['ground', buildGround()],
   ] as const;
   const meshes: Mesh[] = [];

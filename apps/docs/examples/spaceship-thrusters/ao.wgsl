@@ -74,7 +74,10 @@ fn ign(pixel: vec2f) -> f32 {
   for (var i = 0; i < TAPS; i++) {
     let alpha = (f32(i) + 0.5) / f32(TAPS);
     let angle = alpha * TURNS * 2.0 * PI + base;
-    let offset = vec2f(cos(angle), sin(angle)) * (radiusPx * alpha);
+    // Odd taps probe a tight radius for contact shadows, even taps the full
+    // radius for broad occlusion between the stand and the pad.
+    let scale = select(1.0, 0.3, (i & 1) == 1);
+    let offset = vec2f(cos(angle), sin(angle)) * (radiusPx * alpha * scale);
     let tap = clamp(pixel + vec2i(round(offset)), vec2i(0), vec2i(size) - 1);
     let tapDist = textureLoad(sceneDepth, tap, 0).r;
     if (tapDist <= 0.0) { continue; }
@@ -82,7 +85,7 @@ fn ign(pixel: vec2f) -> f32 {
     let vv = dot(v, v);
     if (vv < 1e-6) { continue; }
     let invLen = inverseSqrt(vv);
-    let falloff = max(1.0 - 1.0 / (invLen * ao.radius), 0.0);
+    let falloff = max(1.0 - 1.0 / (invLen * ao.radius * scale), 0.0);
     occlusion += falloff * max(dot(v, n) * invLen - ao.bias, 0.0);
   }
   // Only the taps on the occluder's side of a crease can contribute, so the

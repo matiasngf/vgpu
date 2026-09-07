@@ -108,8 +108,9 @@ export fn fireProfile(sR: f32) -> f32 {
 
 export fn glowProfile(sR: f32) -> f32 {
   // Starts a little downstream of the lip (a visible gap of thin gas first),
-  // ~0.6 of the exit wide, then shrinks while it fades.
-  return mix(0.6, 0.15, smoothstep(2.4, 4.6, sR));
+  // ~0.6 of the exit wide, then narrows to ~0.3 and dissolves into the fire
+  // there: it never closes to a point.
+  return mix(0.6, 0.3, smoothstep(2.6, 5.6, sR));
 }
 
 
@@ -153,7 +154,7 @@ export fn evaluatePlume(
   //   burn/heat — afterburning of CO/H2 with entrained air, the intense
   //               pink-white fire that ignites inside the envelope
   //   shock     — the exit-gas regime (blue-violet engine jets), fading out
-  let exitCore = smoothstep(1.0, 1.8, sR) * (1.0 - smoothstep(2.4, 4.6, sR));
+  let exitCore = smoothstep(1.0, 1.8, sR) * (1.0 - smoothstep(3.4, 6.0, sR));
   let machDisk = exp(-pow((sR - 2.2) / 0.5, 2.0)) * smoothstep(1.0, 0.4, radEnv);
   let shock = 1.0 - smoothstep(0.0, 5.0, sR);
   // The fire starts soft and translucent and gains body as it opens up.
@@ -202,7 +203,9 @@ export fn evaluatePlume(
   // White exit glow: smooth, dense, opaque — the exhaust is still one solid
   // supersonic jet here, no fibres yet. Shrinks and fades along the tail.
   // Its edge is crisp where it appears and blurs out as it dissolves.
-  let glowSoftness = mix(0.2, 0.9, smoothstep(1.6, 4.4, sR));
+  // The edge is crisp where the glow appears and is fully blurred into the
+  // surrounding fire well before it fades out.
+  let glowSoftness = mix(0.2, 1.4, smoothstep(1.8, 5.0, sR));
   let capsuleDensity = smoothstep(0.0, glowSoftness, 1.0 - radCore + turb * 0.04 * ramp) * exitCore * fadeEnd;
 
   // The fire: one fibrous body from the lip onward. Fibres both erode the
