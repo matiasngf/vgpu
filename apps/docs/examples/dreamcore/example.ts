@@ -39,12 +39,12 @@ export interface DreamcoreFrameOptions {
 export interface DreamcoreLookOverrides {
   camera?: Partial<{ height: number; pitch: number; fovY: number }>;
   door?: Partial<{ x: number; z: number; yaw: number; leaf: number }>;
-  /** First dune of the sand world: start behind the sill (m), stoss slope (tan), crest (m), far field level (m). */
-  dune?: Partial<{ start: number; slope: number; crest: number; far: number }>;
-  /** Second, taller dune: gap after the first crest (m), stoss slope (tan), crest (m), crest line skew (tan). */
-  dune2?: Partial<{ gap: number; slope: number; crest: number; skew: number }>;
-  /** First dune crest skew (tan) and the wind ripples on the second dune: amplitude (m), wavelength (m). */
-  sand?: Partial<{ skew: number; rippleAmp: number; rippleLen: number }>;
+  /** Flat sand of the sand world: where it starts tilting up (m behind the sill), tilt (tan), far field level (m). */
+  plain?: Partial<{ tiltFrom: number; tilt: number; far: number }>;
+  /** The dune behind it: start (m behind the sill), stoss slope (tan), crest (m), crest line skew (tan). */
+  dune?: Partial<{ start: number; slope: number; crest: number; skew: number }>;
+  /** Wind ripples on the dune: amplitude (m), wavelength (m). */
+  sand?: Partial<{ rippleAmp: number; rippleLen: number }>;
 }
 
 interface Effects {
@@ -78,10 +78,10 @@ export const LOOK = {
   doorLight: 12,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
-  /** Flat sand for 3 m, a low first dune the eye looks over, and a tall second dune behind it. */
-  dune: { start: 1.5, slope: 0.35, crest: 0.6, far: 1.0 },
-  dune2: { gap: 3.0, slope: 0.5, crest: 4.5, skew: -0.5 },
-  sand: { skew: 0.35, rippleAmp: 0.015, rippleLen: 0.8 },
+  /** Flat sand tilting up 3 degrees from 1.5 m, running straight into a 27 degree dune 6 m in. */
+  plain: { tiltFrom: 1.5, tilt: 0.06, far: 1.0 },
+  dune: { start: 6.0, slope: 0.5, crest: 4.5, skew: -0.5 },
+  sand: { rippleAmp: 0.015, rippleLen: 0.8 },
   post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
@@ -207,9 +207,9 @@ function setConstants(effects: Effects): void {
       look: [sun.azimuth, sun.elevation, LOOK.texture, LOOK.doorLight],
       grass: [grass.radius, grass.height, 1, 0],
       debug: [0, 0, 0, 0],
-      dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.far],
-      dune2: [LOOK.dune2.gap, LOOK.dune2.slope, LOOK.dune2.crest, LOOK.dune2.skew],
-      sand: [LOOK.sand.skew, LOOK.sand.rippleAmp, LOOK.sand.rippleLen, 0],
+      plain: [LOOK.plain.tiltFrom, LOOK.plain.tilt, 0, LOOK.plain.far],
+      dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.skew],
+      sand: [LOOK.sand.rippleAmp, LOOK.sand.rippleLen, 0, 0],
     },
   });
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
@@ -244,8 +244,8 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
   const { post, grass } = LOOK;
   const camera = { ...LOOK.camera, ...frame.look?.camera };
   const door = { ...LOOK.door, ...frame.look?.door };
+  const plain = { ...LOOK.plain, ...frame.look?.plain };
   const dune = { ...LOOK.dune, ...frame.look?.dune };
-  const dune2 = { ...LOOK.dune2, ...frame.look?.dune2 };
   const sand = { ...LOOK.sand, ...frame.look?.sand };
   effects.scene.set({
     params: {
@@ -255,9 +255,9 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
       door: [door.x, door.z, door.yaw, door.leaf],
       grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, frame.wind ?? 0],
       debug: frame.debug ? [frame.debug.mode, ...(frame.debug.camera ?? DEBUG_CAMERA)] : [0, 0, 0, 0],
-      dune: [dune.start, dune.slope, dune.crest, dune.far],
-      dune2: [dune2.gap, dune2.slope, dune2.crest, dune2.skew],
-      sand: [sand.skew, sand.rippleAmp, sand.rippleLen, 0],
+      plain: [plain.tiltFrom, plain.tilt, 0, plain.far],
+      dune: [dune.start, dune.slope, dune.crest, dune.skew],
+      sand: [sand.rippleAmp, sand.rippleLen, 0, 0],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
