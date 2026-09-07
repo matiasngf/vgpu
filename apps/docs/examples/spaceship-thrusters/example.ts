@@ -299,9 +299,22 @@ function destroyHistory(history: PingPongTargets): void {
   for (const target of [history.read, history.write]) (target as { destroy?: () => void }).destroy?.();
 }
 
+export interface ThrusterSequenceOptions {
+  startTime?: number;
+  quality?: ThrusterQuality;
+  camera?: ThrusterCamera;
+  /**
+   * Render all four 2x2 phases at each frame's time before reading it back, so
+   * every frame is a complete plume (offline video) instead of the interleaved
+   * history the live loop shows (temporal check of the interleave itself).
+   */
+  fullFrames?: boolean;
+}
+
 /**
  * Renders `frames` consecutive animated frames (dt apart) and hands each one
- * back, for checking the temporal interleave on moving fire headlessly.
+ * back, for checking the temporal interleave on moving fire headlessly or for
+ * writing an offline clip with `fullFrames`.
  */
 export async function renderSequence(
   gpu: Gpu,
@@ -309,19 +322,25 @@ export async function renderSequence(
   frames: number,
   dt: number,
   onFrame: (index: number, pixels: Uint8Array, size: readonly [number, number]) => void | Promise<void>,
-  startTime = 6.2,
-  quality: ThrusterQuality = RENDER_QUALITY,
+  opts: ThrusterSequenceOptions = {},
 ): Promise<void> {
+  const { startTime = 6.2, quality = RENDER_QUALITY, camera, fullFrames = false } = opts;
   const effects = createEffects(gpu, 'thrusters-sequence', quality);
   const targets = createTargets(gpu, target.size, 'thrusters-sequence', quality);
   const geometry = createGeometry(gpu, effects, targets, 'thrusters-sequence');
   setConstants(effects, targets);
-  setBindings(effects, geometry, targets);
+  setBindings(effects, geometry, targets, camera);
   await prewarm(effects, geometry, targets, target);
   bakeStatic(gpu, effects, geometry, targets);
+  const phases = fullFrames ? 4 : 1;
   for (let i = 0; i < frames; i++) {
-    setFrame(effects, startTime + i * dt, i);
-    gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
+    // Complete frames start from an empty history so nothing of the previous
+    // time leaks in: the resolve replaces never-written texels outright.
+    if (fullFrames) gpu.frame((frame) => frame.pass({ target: targets.fireHistory.read, clear: [0, 0, 0, 0] }, () => {}));
+    for (let phase = 0; phase < phases; phase++) {
+      setFrame(effects, startTime + i * dt, i * phases + phase);
+      gpu.frame((frame) => renderChain(frame, effects, geometry, targets, target));
+    }
     await gpu.gpu.queue.onSubmittedWorkDone();
     await onFrame(i, await target.read(), target.size);
   }
