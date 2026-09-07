@@ -22,6 +22,7 @@ struct Params {
   debug: vec4f,      // debug view (0 off, 1 free camera, 2 top-down map, 3 main camera, 4 main camera clean), camera xyz
   dune: vec4f,       // first dune: start (m behind the sill), stoss slope (tan), crest (m), far field level (m)
   dune2: vec4f,      // second dune: gap after the first crest (m), stoss slope (tan), crest (m), crest line skew (tan)
+  sand: vec4f,       // first dune crest skew (tan), ripple amplitude (m) and wavelength (m) on the second dune, unused
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -419,33 +420,47 @@ fn portalHit(ro: vec3f, rd: vec3f, f: DoorFrame) -> f32 {
 
 // Dune heightfield in door-local space (z grows away from the door). A slip face rises
 // right behind the threshold so the opening is nothing but sand.
+const DUNE_TOE: f32 = 1.2;
+
+// Where the first dune crests (door-local z, before its skew) and where the second begins.
+fn firstCrestZ() -> f32 {
+  return params.dune.x + 1.8 * max(params.dune.z, 0.1) / max(params.dune.y, 0.05);
+}
+
+// Rise coordinate of the second dune: positive on its stoss face and beyond.
+fn secondDuneRise(p: vec2f) -> f32 {
+  let start2 = firstCrestZ() + 1.0 + params.dune2.x;
+  return p.y - start2 + params.dune2.w * p.x + 0.6 * (fbm3(p * 0.12 + vec2f(8.0, 3.0)) - 0.5);
+}
+
 fn duneHeight(p: vec2f) -> f32 {
   let z = p.y;
-  let toe = 1.2;
+  let toe = DUNE_TOE;
   // Flat sand level with the field at the threshold, gently undulating further in.
   var h = 0.05 * (fbm3(p * 0.3 + vec2f(7.0, 1.0)) - 0.5) * smoothstep(0.0, 2.0, z);
   // First dune (params.dune): a soft toe `start` metres in, a stoss face of slope `slope` up to
-  // a rounded crest near `crest`, then a 31 degree slip face down to a trough behind it.
+  // a rounded crest near `crest`, then a 31 degree slip face down to a trough behind it. Its
+  // crest runs on a diagonal (params.sand.x), crossing the second dune's.
   let start = params.dune.x + 0.8 * sin(p.x * 0.35 + 1.0) + 0.8 * (fbm3(p * 0.15 + vec2f(2.0, 5.0)) - 0.5);
-  let rise = z - start;
+  let rise = z - start + params.sand.x * p.x;
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let face0 = toe * log(1.0 + exp(-start / toe));
   let crest = max(params.dune.z, 0.1);
   let slope = max(params.dune.y, 0.05);
   var h1 = crest * tanh(slope * (face - face0) / crest);
-  let zc = start + 1.8 * crest / slope;
-  let drop = 0.6 * 0.45 * log(1.0 + exp((z - zc) / 0.45));
+  let pastCrest = rise - 1.8 * crest / slope;
+  let drop = 0.6 * 0.45 * log(1.0 + exp(pastCrest / 0.45));
   h1 -= min(drop, crest * 0.7);
   h += h1;
   // Second dune (params.dune2): taller, rising from the trough with its crest running at a
   // skew so its face turns partly away from the sand sun.
-  let start2 = zc + 1.0 + params.dune2.x;
-  let rise2 = z - start2 + params.dune2.w * p.x + 0.6 * (fbm3(p * 0.12 + vec2f(8.0, 3.0)) - 0.5);
+  let rise2 = secondDuneRise(p);
   let face2 = max(rise2, 0.0) + toe * log(1.0 + exp(-abs(rise2) / toe));
   let crest2 = max(params.dune2.z, 0.1);
   h += crest2 * tanh(max(params.dune2.y, 0.05) * face2 / crest2);
   // Dune field beyond the second crest: asymmetric dunes (a 10 degree stoss side, a 31 degree
   // slip face) about 34 m apart with wandering crests, sitting at the far field level.
+  let start2 = firstCrestZ() + 1.0 + params.dune2.x;
   let far = smoothstep(start2 + 6.0, start2 + 18.0, z);
   let fieldDir = vec2f(0.85, 0.53);
   let fw = 6.0 * (fbm3(p * 0.03 + vec2f(9.0, 2.0)) - 0.5);
@@ -465,6 +480,64 @@ fn duneGradient(p: vec2f) -> vec2f {
   let hx = duneHeight(p + vec2f(e, 0.0)) - duneHeight(p - vec2f(e, 0.0));
   let hz = duneHeight(p + vec2f(0.0, e)) - duneHeight(p - vec2f(0.0, e));
   return vec2f(hx, hz) / (2.0 * e);
+}
+
+// Wind ripples on the second dune only: crests params.sand.z apart with a gentle stoss side
+// and a steeper lee side, meandering and pinching off into Y junctions; the sand sun rakes
+// across them so the lee sides cast wide, soft shadow bands.
+const RIPPLE_DIR: vec2f = vec2f(0.760, 0.650);   // across the crests, roughly along the sand sun
+
+struct Ripples {
+  warp: f32,    // phase warp at the shaded point (reused along the shadow walk)
+  amp: f32,
+  h: f32,
+  grad: vec2f,  // dh/dx, dh/dz including the meander of the crests
+}
+
+fn rippleWarp(p: vec2f) -> f32 {
+  return 12.5 * (fbm3(p * 0.2 + vec2f(1.0, 4.0)) - 0.5) + 3.5 * (fbm3(p * 0.65 + vec2f(6.0, 2.0)) - 0.5);
+}
+
+fn rippleProfile(u: f32) -> f32 {
+  return sin(u) - 0.28 * sin(2.0 * u) + 0.08 * sin(3.0 * u);
+}
+
+fn rippleSlope(u: f32) -> f32 {
+  return cos(u) - 0.56 * cos(2.0 * u) + 0.24 * cos(3.0 * u);
+}
+
+fn ripples(p: vec2f, footprint: f32) -> Ripples {
+  var r: Ripples;
+  let k = 2.0 * PI / max(params.sand.z, 0.05);
+  r.warp = rippleWarp(p);
+  // Only on the second dune, and faded once a pixel spans a good part of a wavelength.
+  let onSecond = smoothstep(0.0, 2.5, secondDuneRise(p));
+  r.amp = params.sand.y * (0.6 + 0.4 * fbm3(p * 0.12 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.04, 0.14, footprint)) * onSecond;
+  let u = dot(p, RIPPLE_DIR) * k + r.warp;
+  r.h = r.amp * rippleProfile(u);
+  let e = 0.02;
+  let dw = vec2f(rippleWarp(p + vec2f(e, 0.0)) - r.warp, rippleWarp(p + vec2f(0.0, e)) - r.warp) / e;
+  r.grad = r.amp * rippleSlope(u) * (RIPPLE_DIR * k + dw);
+  return r;
+}
+
+// Cast shadow of the ripples: walk toward the sun over one wavelength through the local
+// ripple field, riding on the dune's local slope. Soft edges: the crests are rounded.
+fn rippleShadow(p: vec2f, r: Ripples, sun: vec3f, slope: vec2f) -> f32 {
+  if (r.amp < 1e-5) { return 1.0; }
+  let len = max(params.sand.z, 0.05);
+  let k = 2.0 * PI / len;
+  let dt = len * 0.15;
+  var s = 1.0;
+  for (var i = 1; i <= 8; i++) {
+    let t = f32(i) * dt;
+    let q = p + sun.xz * t;
+    let hq = r.amp * rippleProfile(dot(q, RIPPLE_DIR) * k + r.warp);
+    let ray = r.h + (sun.y - dot(slope, sun.xz)) * t;
+    s = min(s, clamp((ray - hq) / (1.2 * max(params.sand.y, 1e-4)) + 0.5, 0.0, 1.0));
+  }
+  // Skylight and bounce keep the bands from going fully dark.
+  return mix(1.0, s, 0.7);
 }
 
 fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
@@ -520,16 +593,18 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   let sunCol = vec3f(1.0, 0.84, 0.62) * 1.5;      // sunset sun
   let amb = vec3f(0.28, 0.15, 0.09) * 1.5;        // bounce off the surrounding sand
   let slope = duneGradient(p.xz);
-  let n = normalize(vec3f(-slope.x, 1.0, -slope.y));
-  let ndl = max(dot(n, sun), 0.0);
+  let r = ripples(p.xz, footprint);
+  let n = normalize(vec3f(-(slope.x + r.grad.x), 1.0, -(slope.y + r.grad.y)));
+  let shadow = rippleShadow(p.xz, r, sun, slope);
+  let ndl = max(dot(n, sun), 0.0) * shadow;
   var col = albedo * (sunCol * ndl + amb * (0.6 + 0.4 * n.y));
   let v = -rd;
   let h = normalize(sun + v);
   // Broad sheen toward the sun, and a few grains catching it.
-  col += albedo * pow(max(dot(n, h), 0.0), 8.0) * 0.05 * sunCol;
+  col += albedo * pow(max(dot(n, h), 0.0), 8.0) * 0.05 * sunCol * shadow;
   let g = vec3f(hash13(p * 431.0), hash13(p * 517.0 + vec3f(3.0)), hash13(p * 619.0 + vec3f(7.0))) - 0.5;
   let gn = normalize(n + g * 0.6 * grainFade);
-  let glint = pow(max(dot(gn, h), 0.0), 160.0) * step(0.965, hash13(floor(p * 900.0))) * grainFade;
+  let glint = pow(max(dot(gn, h), 0.0), 160.0) * step(0.965, hash13(floor(p * 900.0))) * grainFade * shadow;
   col += sunCol * glint * 0.5;
   return col;
 }
@@ -977,7 +1052,7 @@ fn debugGrid(xz: vec2f, footprint: f32) -> f32 {
 
 // Free camera in the sand world: the door as solid geometry on the flat toe, the slip face
 // behind it, a 1 m grid, the door plane in blue and the part seen through the opening in green.
-// overlays: 0 bare sand, 1 the door and the part seen through it, 2 also the grid and door plane.
+// overlays: 0 bare sand, 1 the door, 2 also the part seen through it, 3 also the grid and door plane.
 fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec3f {
   let f = identityFrame();
   let tDune = marchDune(ro, rd);
@@ -992,11 +1067,11 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec
   let p = ro + rd * tDune;
   let footprint = pixelAngle * tDune;
   var col = shadeSand(p, rd, footprint);
-  if (overlays > 1) {
+  if (overlays > 2) {
     col = mix(col, vec3f(0.05, 0.05, 0.08), debugGrid(p.xz, footprint) * 0.6);
     col = mix(col, vec3f(0.1, 0.3, 1.0), smoothstep(max(footprint * 2.0, 0.006), 0.0, abs(p.z)) * 0.9);
   }
-  if (overlays > 0) {
+  if (overlays > 1) {
     col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
   }
   return mix(col, SAND_HORIZON, 1.0 - exp(-tDune * 0.013));
@@ -1062,7 +1137,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
       let upW = vec3f(dot(up, fD.right), up.y, dot(up, fD.fwd));
       let rightW = vec3f(dot(right, fD.right), right.y, dot(right, fD.fwd));
       let rdM = normalize(fwdW * focal + rightW * sx + upW * sy);
-      acc += renderDebugWorld(camD, rdM, pixelAngle, select(1, 0, params.debug.x > 3.5));
+      acc += renderDebugWorld(camD, rdM, pixelAngle, select(2, 1, params.debug.x > 3.5));
       continue;
     }
     if (params.debug.x > 0.5) {
@@ -1073,7 +1148,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
       let upD = cross(fwdD, rightD);
       let focalD = 1.0 / tan(0.45);
       let rdD = normalize(fwdD * focalD + rightD * sx + upD * sy);
-      acc += renderDebugWorld(cam, rdD, (2.0 / focalD) / res.y, 2);
+      acc += renderDebugWorld(cam, rdD, (2.0 / focalD) / res.y, 3);
       continue;
     }
     let rd = normalize(forward * focal + right * sx + up * sy);
