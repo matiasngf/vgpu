@@ -93,7 +93,7 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
   /** Standing eye height, level horizon; same vertical FOV for any aspect. */
-  camera: { height: 1.5, pitch: -0.06, fovY: 0.733 },
+  camera: { height: 1.5, pitch: 0.02, fovY: 0.733 },
   door: { x: 0, z: 11, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
