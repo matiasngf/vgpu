@@ -53,7 +53,7 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 export const LOOK = {
   /** Elevated camera, matching the reference field photo; same vertical FOV for any aspect. */
   camera: { height: 5.5, pitch: -0.037, fovY: 0.733 },
-  door: { x: 0, z: 14.5, yaw: 0, leaf: 2.5 },
+  door: { x: 0, z: 19.5, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
   doorLight: 12,

@@ -330,7 +330,9 @@ fn grassUV(xz: vec2f, g: GrassFrame) -> vec2f {
 }
 
 fn grassHeight(xz: vec2f, g: GrassFrame) -> f32 {
-  return textureSampleLevel(tileColor, tileSamp, grassUV(xz, g), 0.0).a * TILE_HEIGHT * g.scale * g.cover;
+  // Tufts: the sward is taller and shorter in 40 cm patches, so low light picks out relief.
+  let tuft = 0.7 + 0.6 * vnoise(xz * 2.4 + vec2f(3.0, 11.0));
+  return textureSampleLevel(tileColor, tileSamp, grassUV(xz, g), 0.0).a * TILE_HEIGHT * g.scale * g.cover * tuft;
 }
 
 // Blade layer surface height above the local terrain.
@@ -713,11 +715,27 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
 
+// Blades shadowing blades: walk toward the light through the heightfield. The plain is
+// flat under the patch, so only the blade height changes along the short walk.
+fn grassSelfShadow(p: vec3f, l: vec3f, g: GrassFrame, base: f32, seed: f32) -> f32 {
+  let dt = 0.045;
+  var s = 1.0;
+  for (var i = 0; i < 8; i++) {
+    let q = p + l * ((f32(i) + 0.35 + 0.65 * seed) * dt);
+    let surf = base + grassHeight(q.xz, g);
+    s = min(s, clamp((q.y - surf) / 0.025 + 0.5, 0.0, 1.0));
+    if (s <= 0.0) { break; }
+  }
+  return s;
+}
+
 fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
   let uv = grassUV(p.xz, g);
   let colH = textureSampleLevel(tileColor, tileSamp, uv, 0.0);
   let tanS = textureSampleLevel(tileTangent, tileSamp, uv, 0.0);
-  let hf = clamp((p.y - terrainHeight(p.xz)) / max(params.grass.y, 0.01), 0.0, 1.0);
+  let base = terrainHeight(p.xz);
+  let hf = clamp((p.y - base) / max(params.grass.y, 0.01), 0.0, 1.0);
+  let seed = hash12(p.xz * 311.0 + vec2f(p.y * 57.0));
   var albedo = srgb2lin(colH.rgb);
   // Tile tangent lives in comb space (+x = comb direction); rotate it into the world.
   let tt = tanS.xyz * 2.0 - vec3f(1.0);
@@ -727,12 +745,13 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   let e = 0.006;
   let hx = grassHeight(p.xz + vec2f(e, 0.0), g) - grassHeight(p.xz - vec2f(e, 0.0), g);
   let hz = grassHeight(p.xz + vec2f(0.0, e), g) - grassHeight(p.xz - vec2f(0.0, e), g);
-  var n = normalize(vec3f(-hx * 0.35, 2.0 * e, -hz * 0.35));
+  var n = normalize(vec3f(-hx * 0.7, 2.0 * e, -hz * 0.7));
   let v = -rd;
   let sun = sunDir();
   let sunCol = sunColor();
   let ao = 0.3 + 0.7 * hf;
-  let sh = doorShadow(p + vec3f(0.0, 0.02, 0.0), sun, f, 8.0, 5.0) * terrainShadow(p, sun);
+  let sh = doorShadow(p + vec3f(0.0, 0.02, 0.0), sun, f, 8.0, 5.0) * terrainShadow(p, sun)
+    * mix(1.0, grassSelfShadow(p, sun, g, base, seed), 0.6);
   let tlSun = dot(tangent, sun);
   let kkSun = sqrt(max(1.0 - tlSun * tlSun, 0.0));
   let lambertSun = max(dot(n, sun), 0.0);
@@ -751,7 +770,9 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   if (dayMix < 0.999) {
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
-    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0);
+    let sMid = f.origin + f.right * DOOR_SAMPLES[1].x + vec3f(0.0, DOOR_SAMPLES[1].y, 0.0);
+    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0)
+      * grassSelfShadow(p, normalize(sMid - p), g, base, seed);
     var e2 = 0.0;
     var spec = 0.0;
     for (var j = 0; j < 3; j++) {
@@ -764,9 +785,9 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
       let geom = facing / (d * d + 0.6);
       let tl = dot(tangent, l);
       let kk = sqrt(max(1.0 - tl * tl, 0.0));
-      let lam = max(dot(n, l), 0.0) + 0.15;
+      let lam = max(dot(n, l), 0.0) + 0.05;
       let tr = grassTransmittance(hf, l, g.cover);
-      e2 += geom * mix(lam, kk, 0.5) * tr;
+      e2 += geom * mix(lam, kk, 0.3) * tr;
       let hl = normalize(l + v);
       let th = dot(tangent, hl);
       spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 16.0) * tr;
@@ -812,10 +833,24 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
   let tDoor = marchDoor(ro, rd, tLimit, f);
 
   var t = tTerrain;
-  var kind = 0;   // 0 sky, 1 terrain, 2 door
+  var kind = 0;   // 0 sky, 1 terrain, 2 door, 3 blade layer
   if (t > 0.0) { kind = 1; }
   if (tDoor > 0.0 && (t < 0.0 || tDoor < t)) { t = tDoor; kind = 2; }
-  let throughDoor = tPortal > 0.0 && (t < 0.0 || tPortal < t);
+  var throughDoor = tPortal > 0.0 && (t < 0.0 || tPortal < t);
+
+  // The blade layer rides on the terrain: march it in front of whatever the ray reached
+  // first, so blades also overlap the sill, the leaf and the bottom of the opening.
+  var g: GrassFrame;
+  var iv = grassInterval(ro, rd, tTerrain);
+  let tBlock = select(t, tPortal, throughDoor);
+  if (tBlock > 0.0) { iv.y = min(iv.y, tBlock); }
+  if (iv.y > iv.x) {
+    g = grassFrame((ro + rd * iv.y).xz);
+    if (g.cover > 0.01) {
+      let tg = grassMarch(ro, rd, iv.x, iv.y, g);
+      if (tg > 0.0) { t = tg; kind = 3; throughDoor = false; }
+    }
+  }
 
   var color = vec3f(0.0);
   if (throughDoor) {
@@ -842,24 +877,11 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
     if (kind == 2) {
       let n = doorNormal(p, f);
       color = shadeDoor(p, n, rd, f, dayMix, rim);
+    } else if (kind == 3) {
+      color = shadeGrass(p, rd, g, f, dayMix, rim);
     } else {
       let n = terrainNormal(p, max(0.08, footprint * 0.5));
       color = shadeGround(p, n, rd, t, footprint, f, dayMix, rim);
-    }
-    // The blade layer rides on the terrain in front of the terrain hit.
-    var iv = vec2f(1.0, 0.0);
-    if (kind == 1) { iv = grassInterval(ro, rd, t); }
-    if (iv.y > iv.x) {
-      let g = grassFrame((ro + rd * iv.y).xz);
-      if (g.cover > 0.01) {
-        let tg = grassMarch(ro, rd, iv.x, iv.y, g);
-        if (tg > 0.0) {
-          let pg = ro + rd * tg;
-          let frontG = dayFront(pg, f);
-          color = shadeGrass(pg, rd, g, f, frontG.x, frontG.y);
-          t = tg;
-        }
-      }
     }
     // Aerial perspective: night haze is heavier than the crisp day.
     let fogNight = skyNight(vec3f(rd.x, 0.02, rd.z)) * 0.9;
