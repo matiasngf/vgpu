@@ -444,8 +444,8 @@ fn duneGradient(p: vec2f) -> vec2f {
 // Wind ripples, from the close-up reference: crests about 9 cm apart with a gentle stoss
 // side and a steeper lee side, meandering and pinching off into Y junctions. The sand sun
 // rakes across them so the lee sides cast the wide, soft shadow bands of the photo.
-const RIPPLE_LEN: f32 = 0.10;
-const RIPPLE_AMP: f32 = 0.0032;
+const RIPPLE_LEN: f32 = 0.17;
+const RIPPLE_AMP: f32 = 0.0045;
 const RIPPLE_DIR: vec2f = vec2f(0.849, -0.529);  // across the crests (they run up the face diagonally)
 
 struct Ripples {
@@ -456,7 +456,7 @@ struct Ripples {
 }
 
 fn rippleWarp(p: vec2f) -> f32 {
-  return 22.0 * (fbm3(p * 0.9 + vec2f(1.0, 4.0)) - 0.5) + 6.0 * (fbm3(p * 3.0 + vec2f(6.0, 2.0)) - 0.5);
+  return 13.0 * (fbm3(p * 0.9 + vec2f(1.0, 4.0)) - 0.5) + 3.6 * (fbm3(p * 3.0 + vec2f(6.0, 2.0)) - 0.5);
 }
 
 fn rippleProfile(u: f32) -> f32 {
@@ -471,8 +471,10 @@ fn ripples(p: vec2f, footprint: f32) -> Ripples {
   var r: Ripples;
   let k = 2.0 * PI / RIPPLE_LEN;
   r.warp = rippleWarp(p);
-  // Fade the ripples out once a pixel spans a good part of a wavelength.
-  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.5 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.009, 0.03, footprint));
+  // Fade the ripples out once a pixel spans a good part of a wavelength, and keep them
+  // faint on the smooth sand right behind the threshold (p.y is the door-local z).
+  let nearDoor = mix(0.25, 1.0, smoothstep(0.0, 2.5, p.y));
+  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.5 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.009, 0.03, footprint)) * nearDoor;
   let u = dot(p, RIPPLE_DIR) * k + r.warp;
   r.h = r.amp * rippleProfile(u);
   let e = 0.02;

@@ -55,13 +55,13 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 export const LOOK = {
   /** Elevated camera, matching the reference field photo; same vertical FOV for any aspect. */
   camera: { height: 4.3, pitch: -0.037, fovY: 0.733 },
-  door: { x: 0, z: 16, yaw: 0, leaf: 2.5 },
+  door: { x: 0, z: 14, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
   doorLight: 12,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
-  post: { exposure: 1, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  post: { exposure: 1.15, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
