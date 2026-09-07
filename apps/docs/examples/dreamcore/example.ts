@@ -28,6 +28,13 @@ export interface DreamcoreFrameOptions {
   wind?: number;
   /** Debug views of the sand world behind the door: 1 = free camera at a door-local position, 2 = top-down map. */
   debug?: { mode: 1 | 2; camera?: readonly [number, number, number] };
+  /** Camera and door overrides on top of LOOK, for exploring alternative framings. */
+  look?: DreamcoreLookOverrides;
+}
+
+export interface DreamcoreLookOverrides {
+  camera?: Partial<{ height: number; pitch: number; fovY: number }>;
+  door?: Partial<{ x: number; z: number; yaw: number; leaf: number }>;
 }
 
 interface Effects {
@@ -217,12 +224,15 @@ function setBindings(effects: Effects, targets: Targets): void {
 
 function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
   const phase = Math.min(1, Math.max(0, frame.phase));
-  const { camera, post, grass } = LOOK;
+  const { post, grass } = LOOK;
+  const camera = { ...LOOK.camera, ...frame.look?.camera };
+  const door = { ...LOOK.door, ...frame.look?.door };
   effects.scene.set({
     params: {
       time: frame.time ?? 0,
       phase,
       camera: [camera.height, camera.pitch, camera.fovY, frame.samples ?? 1],
+      door: [door.x, door.z, door.yaw, door.leaf],
       grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, frame.wind ?? 0],
       debug: frame.debug ? [frame.debug.mode, ...(frame.debug.camera ?? DEBUG_CAMERA)] : [0, 0, 0, 0],
     },
