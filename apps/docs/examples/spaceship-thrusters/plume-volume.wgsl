@@ -103,7 +103,7 @@ export fn blackbody(temperature: f32) -> vec3f {
 //    shrinks while it fades out.
 export fn fireProfile(sR: f32) -> f32 {
   let squeeze = mix(1.0, 0.85, smoothstep(0.2, 2.0, sR));
-  return mix(squeeze, 1.6, smoothstep(3.5, 14.0, sR));
+  return mix(squeeze, 1.3, smoothstep(3.5, 14.0, sR));
 }
 
 export fn glowProfile(sR: f32) -> f32 {
@@ -221,7 +221,7 @@ export fn evaluatePlume(
   // only warms from lavender-white to orange as soot heats up, while the
   // fringe above expands and dilutes. The column takes over from the shared
   // body as dispersion sets in.
-  let columnWorld = plume.r0 * mix(0.9, 1.15, smoothstep(3.5, 16.0, sR));
+  let columnWorld = plume.r0 * mix(0.9, 1.05, smoothstep(3.5, 16.0, sR));
   let radCol = length(q) / columnWorld;
   // Fibres erode the column's edge and carry most of its density, so the
   // long hairs and knots of the original fire stay visible inside it.
@@ -246,7 +246,7 @@ export fn evaluatePlume(
   let axial = core * core * core;
   // Emission per unit falls off hard as the gas mixes out: the far plume in
   // the reference is a mid-tone, only the exit region clips the sensor.
-  let spent = mix(1.0, 0.12, disperse);
+  let spent = mix(1.0, 0.2, disperse);
   // The afterburning gas starts out blue-violet just past the neck (the
   // reference's electric-blue jets) and turns magenta as it burns through.
   let warm = smoothstep(5.0, 14.0, sR);
@@ -269,7 +269,7 @@ export fn evaluatePlume(
   let columnTint = mix(rimTint, coreTint, colAxial);
   // Only the hair ridges clip; between them the column sits in the mid-tones,
   // so the fibre structure reads instead of a flat clipped band.
-  let columnGlow = columnTint * (colDensity * (0.05 + 0.9 * colAxial + 5.5 * ridge) * plume.glowGain * 0.55);
+  let columnGlow = columnTint * (colDensity * (0.15 + 1.2 * colAxial + 5.5 * ridge) * plume.glowGain * 0.9);
 
   // Exit region: discrete engine jets read as sharp parallel streaks of
   // blue-violet gas, with the first diamonds glowing warm white.
