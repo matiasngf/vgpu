@@ -20,7 +20,7 @@ struct Params {
   look: vec4f,       // sun azimuth (rad), sun elevation (rad), texture strength, door light
   grass: vec4f,      // blade radius (m), blade height (m), blade shadow rays (0/1), wind
   debug: vec4f,      // debug view (0 off, 1 free camera, 2 top-down map, 3 main camera, 4 main camera clean), camera xyz
-  plain: vec4f,      // flat sand: where it starts tilting (m behind the sill), tilt (tan), unused, far field level (m)
+  plain: vec4f,      // flat sand: where it starts falling away (m behind the sill), fall (tan), unused, hollow depth (m, negative)
   dune: vec4f,       // the dune: start (m behind the sill), stoss slope (tan), crest (m), crest line skew (tan)
   sand: vec4f,       // wind ripples on the flat sand: amplitude (m), wavelength (m), fade distance from the camera (m), crest position (0..1 of the period)
 }
@@ -432,30 +432,52 @@ fn duneRise(p: vec2f) -> f32 {
 fn duneHeight(p: vec2f) -> f32 {
   let z = p.y;
   let toe = DUNE_TOE;
-  // Flat sand level with the field at the threshold, gently undulating further in, then
-  // tilting up a few degrees (params.plain.y) from params.plain.x on, straight into the dune:
-  // no ridge, no drop, no crest line in front of it.
+  // Flat sand level with the field at the threshold, gently undulating further in.
   var h = 0.10 * (fbm3(p * 0.3 + vec2f(7.0, 1.0)) - 0.5) * smoothstep(0.0, 2.0, z);
+  // From params.plain.x on the sand falls away at params.plain.y and settles into a hollow
+  // params.plain.w below the sill, so the dunes beyond stand up out of it at a distance.
   let t = z - params.plain.x;
-  h += params.plain.y * (max(t, 0.0) + toe * log(1.0 + exp(-abs(t) / toe)) - toe * log(1.0 + exp(-params.plain.x / toe)));
-  // The dune (params.dune): a soft toe `start` metres in, a stoss face of slope `slope` up to
-  // a rounded crest near `crest`.
+  let ramp = max(t, 0.0) + toe * log(1.0 + exp(-abs(t) / toe)) - toe * log(1.0 + exp(-params.plain.x / toe));
+  let depth = max(-params.plain.w, 0.1);
+  h -= depth * tanh(ramp * params.plain.y / depth);
+  // The near dune (params.dune): a soft toe `start` metres in, its toe line skewed so it runs in
+  // diagonally from the right, a face of slope `slope` up to a rounded crest `crest` above the
+  // hollow, then down its back.
   let rise = duneRise(p);
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let crest = max(params.dune.z, 0.1);
-  h += crest * tanh(max(params.dune.y, 0.05) * face / crest);
-  // Dune field beyond the crest: asymmetric dunes (a 10 degree stoss side, a 31 degree slip
-  // face) about 34 m apart with wandering crests, sitting at the far field level.
-  let far = smoothstep(params.dune.x + 6.0, params.dune.x + 18.0, z);
+  let slope = max(params.dune.y, 0.05);
+  let back = 1.5 * crest / slope;
+  h += crest * tanh(slope * face / crest) * (1.0 - smoothstep(back, back + 30.0, rise));
+  // A tall dune off to the right, outside the door's view, standing against the sun: the band of
+  // shadow that crosses the hollow is its.
+  let side = p.x - 13.0 + 0.15 * (z - 20.0) + 2.0 * (fbm3(p * 0.05 + vec2f(2.0, 9.0)) - 0.5);
+  let sideFace = max(side, 0.0) + toe * log(1.0 + exp(-abs(side) / toe));
+  h += 11.0 * tanh(sideFace / 11.0) * smoothstep(20.0, 30.0, z) * (1.0 - smoothstep(60.0, 110.0, z));
+  // A big dune far behind the door, its face toward us, so the opening looks at dunes all the
+  // way up instead of sky.
+  let farRise = z - 100.0 + 0.25 * p.x + 6.0 * (fbm3(p * 0.012 + vec2f(5.0, 1.0)) - 0.5);
+  let farFace = max(farRise, 0.0) + toe * log(1.0 + exp(-abs(farRise) / toe));
+  h += 16.0 * tanh(0.5 * farFace / 16.0) * (1.0 - smoothstep(60.0, 120.0, farRise));
+  // Dune field beyond: asymmetric dunes (a 10 degree stoss side, a 30 degree slip face) about
+  // 34 m apart with wandering crests, and a second family three times bigger further out, in
+  // the same proportions so no face gets steeper than sand allows.
+  let far = smoothstep(params.dune.x + 8.0, params.dune.x + 30.0, z);
   let fieldDir = vec2f(0.85, 0.53);
   let fw = 6.0 * (fbm3(p * 0.03 + vec2f(9.0, 2.0)) - 0.5);
   let u = fract((dot(p, fieldDir) + fw) / 34.0 + 0.3);
   let stoss = 0.78;
   let prof = select((1.0 - u) / (1.0 - stoss), u / stoss, u < stoss);
   let fieldAmp = 4.5 * (0.55 + 0.45 * fbm3(p * 0.02 + vec2f(4.0, 6.0)));
-  h += far * (fieldAmp * prof - 2.2 + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + params.plain.w);
-  // Sweeping undulations and small roughness on the slope only; the flat sand stays smooth.
-  let onSlope = smoothstep(0.0, 3.0, rise);
+  h += far * (fieldAmp * prof + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5));
+  let far2 = smoothstep(90.0, 140.0, z);
+  let dir2 = vec2f(0.6, 0.8);
+  let fw2 = 15.0 * (fbm3(p * 0.01 + vec2f(3.0, 5.0)) - 0.5);
+  let u2 = fract((dot(p, dir2) + fw2) / 110.0 + 0.6);
+  let prof2 = select((1.0 - u2) / (1.0 - stoss), u2 / stoss, u2 < stoss);
+  h += far2 * 14.0 * (0.6 + 0.4 * fbm3(p * 0.008 + vec2f(7.0, 2.0))) * prof2;
+  // Sweeping undulations and small roughness on the near dune's slope only; the flat sand stays smooth.
+  let onSlope = smoothstep(0.0, 3.0, rise) * (1.0 - smoothstep(back, back + 30.0, rise));
   h += 0.18 * (fbm3(p * 0.22 + vec2f(4.0, 7.0)) - 0.5) * onSlope;
   h += 0.04 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * onSlope;
   return h;
@@ -574,7 +596,7 @@ fn duneShadow(p: vec3f, sun: vec3f) -> f32 {
   for (var i = 0; i < 26; i++) {
     let q = p + sun * t;
     let d = q.y - duneHeight(q.xz);
-    s = min(s, clamp(6.0 * d / t, 0.0, 1.0));
+    s = min(s, clamp(32.0 * d / t, 0.0, 1.0));   // a penumbra of about 2 degrees
     if (s < 0.01 || t > 90.0) { break; }
     t += max(0.35, t * 0.22);
   }
@@ -585,13 +607,17 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   var t = 0.02;
   var lastT = 0.0;
   var hit = -1.0;
-  for (var i = 0; i < 160; i++) {
+  // Enough steps for rays that skim along the far dunes: running out early would leave
+  // holes of sky along their crests.
+  for (var i = 0; i < 480; i++) {
     let p = ro + rd * t;
     let d = p.y - duneHeight(p.xz);
-    if (d < 0.0) { hit = t; break; }
-    if (t > 60.0) { break; }
+    // Sand within about a pixel of the ray counts as hit, so distant crests keep clean
+    // silhouettes instead of sawing between the samples.
+    if (d < 0.0005 * t) { hit = t; break; }
+    if (t > 260.0) { break; }
     lastT = t;
-    t += clamp(d * 0.5, 0.01 + 0.01 * t, 2.0);
+    t += clamp(d * 0.4, 0.01 + 0.006 * t, 4.0);
   }
   if (hit < 0.0) { return -1.0; }
   var a = lastT;
@@ -599,7 +625,7 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   for (var i = 0; i < 6; i++) {
     let m = 0.5 * (a + b);
     let p = ro + rd * m;
-    if (p.y - duneHeight(p.xz) < 0.0) { b = m; } else { a = m; }
+    if (p.y - duneHeight(p.xz) < 0.0005 * m) { b = m; } else { a = m; }
   }
   return 0.5 * (a + b);
 }
@@ -667,7 +693,7 @@ fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
   }
   let p = ro + rd * t;
   let col = shadeSand(p, rd, pixelAngle * (tBase + t));
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.012));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0035));
 }
 
 // ---------------------------------------------------------------- lighting
@@ -1125,7 +1151,7 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec
   if (overlays > 1) {
     col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
   }
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(tDune - 30.0, 0.0) * 0.012));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(tDune - 30.0, 0.0) * 0.0035));
 }
 
 // Top-down map of the sand world: x in [-6, 6], z in [-2, 22] (camera side at the bottom),

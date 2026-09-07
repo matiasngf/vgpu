@@ -41,9 +41,9 @@ export interface DreamcoreFrameOptions {
 export interface DreamcoreLookOverrides {
   camera?: Partial<{ height: number; pitch: number; fovY: number }>;
   door?: Partial<{ x: number; z: number; yaw: number; leaf: number }>;
-  /** Flat sand of the sand world: where it starts tilting up (m behind the sill), tilt (tan), far field level (m). */
+  /** Flat sand of the sand world: where it starts falling away (m behind the sill), fall (tan), hollow depth (m, negative). */
   plain?: Partial<{ tiltFrom: number; tilt: number; far: number }>;
-  /** The dune behind it: start (m behind the sill), stoss slope (tan), crest (m), crest line skew (tan). */
+  /** The near dune beyond the hollow: start (m behind the sill), face slope (tan), crest (m), toe line skew (tan). */
   dune?: Partial<{ start: number; slope: number; crest: number; skew: number }>;
   /** Wind ripples on the flat sand: amplitude (m), wavelength (m), distance from the camera where they have faded (m), crest position (0..1 of the period, low = steep side toward the door). */
   sand?: Partial<{ rippleAmp: number; rippleLen: number; rippleFade: number; rippleCrest: number }>;
@@ -100,9 +100,9 @@ export const LOOK = {
   doorLight: 10,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
-  /** Rippled flat sand, a backlit dune closing in from the right, a dune field to the horizon. */
-  plain: { tiltFrom: 3.0, tilt: 0.03, far: 2.0 },
-  dune: { start: 13.5, slope: 0.5, crest: 2.5, skew: 0.55 },
+  /** Rippled flat sand falling into a hollow, a backlit dune running in from the right, dunes growing to the horizon. */
+  plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
+  dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },
   sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
   post: { exposure: 1.3, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
