@@ -448,8 +448,8 @@ fn duneGradient(p: vec2f) -> vec2f {
 // Wind ripples, from the close-up reference: crests about 9 cm apart with a gentle stoss
 // side and a steeper lee side, meandering and pinching off into Y junctions. The sand sun
 // rakes across them so the lee sides cast the wide, soft shadow bands of the photo.
-const RIPPLE_LEN: f32 = 0.17;
-const RIPPLE_AMP: f32 = 0.0045;
+const RIPPLE_LEN: f32 = 0.40;
+const RIPPLE_AMP: f32 = 0.007;
 const RIPPLE_DIR: vec2f = vec2f(0.760, 0.650);   // across the crests, roughly along the sand sun
 
 struct Ripples {
@@ -460,7 +460,7 @@ struct Ripples {
 }
 
 fn rippleWarp(p: vec2f) -> f32 {
-  return 13.0 * (fbm3(p * 0.9 + vec2f(1.0, 4.0)) - 0.5) + 3.6 * (fbm3(p * 3.0 + vec2f(6.0, 2.0)) - 0.5);
+  return 12.5 * (fbm3(p * 0.4 + vec2f(1.0, 4.0)) - 0.5) + 3.5 * (fbm3(p * 1.3 + vec2f(6.0, 2.0)) - 0.5);
 }
 
 fn rippleProfile(u: f32) -> f32 {
@@ -477,8 +477,8 @@ fn ripples(p: vec2f, footprint: f32) -> Ripples {
   r.warp = rippleWarp(p);
   // Fade the ripples out once a pixel spans a good part of a wavelength, and keep them
   // faint on the smooth sand right behind the threshold (p.y is the door-local z).
-  let nearDoor = mix(0.25, 1.0, smoothstep(0.0, 2.5, p.y));
-  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.5 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.009, 0.03, footprint)) * nearDoor;
+  let nearDoor = mix(0.25, 1.0, smoothstep(0.0, 3.5, p.y));
+  r.amp = RIPPLE_AMP * (0.6 + 0.4 * fbm3(p * 0.25 + vec2f(3.0, 7.0))) * (1.0 - smoothstep(0.02, 0.07, footprint)) * nearDoor;
   let u = dot(p, RIPPLE_DIR) * k + r.warp;
   r.h = r.amp * rippleProfile(u);
   let e = 0.02;
@@ -498,9 +498,10 @@ fn rippleShadow(p: vec2f, r: Ripples, sun: vec3f, slope: vec2f) -> f32 {
     let q = p + sun.xz * t;
     let hq = r.amp * rippleProfile(dot(q, RIPPLE_DIR) * k + r.warp);
     let ray = r.h + (sun.y - dot(slope, sun.xz)) * t;
-    s = min(s, clamp((ray - hq) / (0.7 * RIPPLE_AMP) + 0.5, 0.0, 1.0));
+    s = min(s, clamp((ray - hq) / (1.2 * RIPPLE_AMP) + 0.5, 0.0, 1.0));
   }
-  return s;
+  // Skylight and bounce keep the bands from going fully dark.
+  return mix(1.0, s, 0.7);
 }
 
 fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
