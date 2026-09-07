@@ -71,15 +71,15 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
   /** Standing eye height, level horizon; same vertical FOV for any aspect. */
-  camera: { height: 2.0, pitch: 0, fovY: 0.733 },
-  door: { x: 0, z: 9, yaw: 0, leaf: 2.5 },
+  camera: { height: 3.0, pitch: 0, fovY: 0.733 },
+  door: { x: 0, z: 11, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
   doorLight: 12,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
   /** Flat sand for 3 m, a low first dune the eye looks over, and a tall second dune behind it. */
-  dune: { start: 3.0, slope: 0.30, crest: 1.0, far: 1.0 },
+  dune: { start: 1.5, slope: 0.35, crest: 0.6, far: 1.0 },
   dune2: { gap: 3.0, slope: 0.5, crest: 4.5, skew: -0.5 },
   sand: { skew: 0.35, rippleAmp: 0.015, rippleLen: 0.8 },
   post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
