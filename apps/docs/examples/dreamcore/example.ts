@@ -1,6 +1,8 @@
 import type { Effect, Frame, Gpu, Surface, Target } from 'vgpu';
 
-import blurWgsl from './blur.wgsl';
+import bloomBlurWgsl from './bloom-blur.wgsl';
+import bloomDownWgsl from './bloom-down.wgsl';
+import bloomUpWgsl from './bloom-up.wgsl';
 import brightPassWgsl from './bright-pass.wgsl';
 import { createGrassTile, renderGrassTile, type GrassTile } from './grass-tile';
 import postWgsl from './post.wgsl';
@@ -43,27 +45,47 @@ export interface DreamcoreLookOverrides {
   plain?: Partial<{ tiltFrom: number; tilt: number; far: number }>;
   /** The dune behind it: start (m behind the sill), stoss slope (tan), crest (m), crest line skew (tan). */
   dune?: Partial<{ start: number; slope: number; crest: number; skew: number }>;
-  /** Wind ripples on the dune: amplitude (m), wavelength (m). */
-  sand?: Partial<{ rippleAmp: number; rippleLen: number }>;
+  /** Wind ripples on the flat sand: amplitude (m), wavelength (m), distance from the camera where they have faded (m), crest position (0..1 of the period, low = steep side toward the door). */
+  sand?: Partial<{ rippleAmp: number; rippleLen: number; rippleFade: number; rippleCrest: number }>;
+}
+
+/** One level of the bloom mip chain: its own blurred glow and the glow gathered from below. */
+interface BloomLevel {
+  down: Effect | null;   // null on level 0, which the bright pass fills
+  blurH: Effect;
+  blurV: Effect;
+  up: Effect | null;     // null on the smallest level, which has nothing below it
 }
 
 interface Effects {
   scene: Effect;
   grassTile: GrassTile;
   brightPass: Effect;
-  blurH1: Effect;
-  blurV1: Effect;
-  blurH2: Effect;
-  blurV2: Effect;
+  bloom: BloomLevel[];
   post: Effect;
   sampler: GPUSampler;
 }
 
+interface BloomTargets {
+  glow: Target;   // this level's blurred glow
+  temp: Target;   // half of the separable blur
+  acc: Target;    // glow gathered from this level down
+}
+
 interface Targets {
   scene: Target;
-  bloomA: Target;
-  bloomB: Target;
+  bloom: BloomTargets[];
 }
+
+/**
+ * Unreal-style bloom: the bright pass lands at half resolution, then a chain of ever smaller
+ * mips is downsampled, blurred one texel per tap, and summed back up through tent filters,
+ * so the halo reaches across the frame without any pass skipping pixels.
+ */
+const BLOOM_LEVELS = 5;
+const BLOOM_SIGMA = 2.6;
+/** Weight of each level's own glow when summing back up; the small mips carry the wide halo. */
+const BLOOM_WEIGHTS = [0.9, 0.9, 1.0, 1.0, 1.0];
 
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
@@ -71,18 +93,18 @@ const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
   /** Standing eye height, level horizon; same vertical FOV for any aspect. */
-  camera: { height: 3.0, pitch: -0.11, fovY: 0.733 },
+  camera: { height: 1.5, pitch: -0.11, fovY: 0.733 },
   door: { x: 0, z: 11, yaw: 0, leaf: 2.5 },
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
-  doorLight: 12,
+  doorLight: 10,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
-  /** Flat sand tilting up 3 degrees from 1.5 m, running straight into a 27 degree dune 6 m in. */
-  plain: { tiltFrom: 1.5, tilt: 0.06, far: 1.0 },
-  dune: { start: 6.0, slope: 0.5, crest: 4.5, skew: -0.5 },
-  sand: { rippleAmp: 0.015, rippleLen: 0.8 },
-  post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  /** Rippled flat sand, a backlit dune closing in from the right, a dune field to the horizon. */
+  plain: { tiltFrom: 3.0, tilt: 0.03, far: 1.2 },
+  dune: { start: 13.5, slope: 0.6, crest: 4.0, skew: 0.55 },
+  sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
+  post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
@@ -175,12 +197,14 @@ function createEffects(gpu: Gpu, label: string): Effects {
     scene: gpu.effect(sceneWgsl, { label: `${label}-scene` }),
     grassTile: createGrassTile(gpu, 2048, `${label}-grass-tile`),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
-    // Each blur pass owns its uniform buffer; sharing one effect would make every pass
-    // observe the last direction written in the frame.
-    blurH1: gpu.effect(blurWgsl, { label: `${label}-blur-h1` }),
-    blurV1: gpu.effect(blurWgsl, { label: `${label}-blur-v1` }),
-    blurH2: gpu.effect(blurWgsl, { label: `${label}-blur-h2` }),
-    blurV2: gpu.effect(blurWgsl, { label: `${label}-blur-v2` }),
+    // Every pass owns its effect, and so its uniform buffer; sharing one would make each
+    // pass observe the last values written in the frame.
+    bloom: Array.from({ length: BLOOM_LEVELS }, (_, i) => ({
+      down: i === 0 ? null : gpu.effect(bloomDownWgsl, { label: `${label}-bloom-down-${i}` }),
+      blurH: gpu.effect(bloomBlurWgsl, { label: `${label}-bloom-blur-h-${i}` }),
+      blurV: gpu.effect(bloomBlurWgsl, { label: `${label}-bloom-blur-v-${i}` }),
+      up: i === BLOOM_LEVELS - 1 ? null : gpu.effect(bloomUpWgsl, { label: `${label}-bloom-up-${i}` }),
+    })),
     post: gpu.effect(postWgsl, { label: `${label}-post` }),
     sampler: gpu.sampler({ minFilter: 'linear', magFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
   };
@@ -188,12 +212,17 @@ function createEffects(gpu: Gpu, label: string): Effects {
 
 function createTargets(gpu: Gpu, size: readonly [number, number], label: string): Targets {
   const full = normalizeSize(size);
-  const half = halfSize(full);
-  return {
-    scene: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene` }),
-    bloomA: gpu.target({ size: half, format: HDR_FORMAT, label: `${label}-bloom-a` }),
-    bloomB: gpu.target({ size: half, format: HDR_FORMAT, label: `${label}-bloom-b` }),
-  };
+  const bloom: BloomTargets[] = [];
+  let level = halfSize(full);
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    bloom.push({
+      glow: gpu.target({ size: level, format: HDR_FORMAT, label: `${label}-bloom-${i}-glow` }),
+      temp: gpu.target({ size: level, format: HDR_FORMAT, label: `${label}-bloom-${i}-temp` }),
+      acc: gpu.target({ size: level, format: HDR_FORMAT, label: `${label}-bloom-${i}-acc` }),
+    });
+    level = halfSize(level);
+  }
+  return { scene: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene` }), bloom };
 }
 
 function setConstants(effects: Effects): void {
@@ -209,14 +238,16 @@ function setConstants(effects: Effects): void {
       debug: [0, 0, 0, 0],
       plain: [LOOK.plain.tiltFrom, LOOK.plain.tilt, 0, LOOK.plain.far],
       dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.skew],
-      sand: [LOOK.sand.rippleAmp, LOOK.sand.rippleLen, 0, 0],
+      sand: [LOOK.sand.rippleAmp, LOOK.sand.rippleLen, LOOK.sand.rippleFade, LOOK.sand.rippleCrest],
     },
   });
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
-  effects.blurH1.set({ samp: effects.sampler, blur: { direction: [1, 0], radius: 1 } });
-  effects.blurV1.set({ samp: effects.sampler, blur: { direction: [0, 1], radius: 1 } });
-  effects.blurH2.set({ samp: effects.sampler, blur: { direction: [1, 0], radius: 3.2 } });
-  effects.blurV2.set({ samp: effects.sampler, blur: { direction: [0, 1], radius: 3.2 } });
+  effects.bloom.forEach((level, i) => {
+    level.down?.set({ samp: effects.sampler });
+    level.blurH.set({ samp: effects.sampler, blur: { direction: [1, 0], sigma: BLOOM_SIGMA } });
+    level.blurV.set({ samp: effects.sampler, blur: { direction: [0, 1], sigma: BLOOM_SIGMA } });
+    level.up?.set({ samp: effects.sampler, up: { weight: BLOOM_WEIGHTS[i] ?? 1, _pad: 0 } });
+  });
   effects.post.set({
     samp: effects.sampler,
     post: { exposure: post.exposure, bloomStrength: post.bloomStrength, grain: post.grain, vignette: post.vignette, seed: 0.37, _pad: 0 },
@@ -232,11 +263,18 @@ function setBindings(effects: Effects, targets: Targets): void {
     tileSamp: effects.sampler,
   });
   effects.brightPass.set({ src: targets.scene });
-  effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
-  effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
-  effects.blurH2.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
-  effects.blurV2.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
-  effects.post.set({ scene: targets.scene, bloom: targets.bloomA, post: { resolution: targets.scene.size } });
+  effects.bloom.forEach((level, i) => {
+    const mine = targets.bloom[i]!;
+    const above = targets.bloom[i - 1];
+    const below = targets.bloom[i + 1];
+    if (level.down && above) level.down.set({ src: above.glow, down: { texelSize: above.glow.texelSize } });
+    level.blurH.set({ src: mine.glow, blur: { texelSize: mine.glow.texelSize } });
+    level.blurV.set({ src: mine.temp, blur: { texelSize: mine.temp.texelSize } });
+    if (level.up && below) level.up.set({ own: mine.glow, smaller: below.acc, up: { texelSize: below.acc.texelSize } });
+  });
+  const last = targets.bloom[BLOOM_LEVELS - 1]!;
+  effects.post.set({ scene: targets.scene, bloom: targets.bloom[0]!.acc, post: { resolution: targets.scene.size } });
+  void last;
 }
 
 function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
@@ -257,7 +295,7 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
       debug: frame.debug ? [frame.debug.mode, ...(frame.debug.camera ?? DEBUG_CAMERA)] : [0, 0, 0, 0],
       plain: [plain.tiltFrom, plain.tilt, 0, plain.far],
       dune: [dune.start, dune.slope, dune.crest, dune.skew],
-      sand: [sand.rippleAmp, sand.rippleLen, 0, 0],
+      sand: [sand.rippleAmp, sand.rippleLen, sand.rippleFade, sand.rippleCrest],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
@@ -268,21 +306,33 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
 }
 
 async function prewarm(effects: Effects, targets: Targets, output: Output): Promise<void> {
+  const level0 = targets.bloom[0]!;
   await Promise.all([
-    effects.scene.compile(targets.scene), effects.brightPass.compile(targets.bloomA), effects.grassTile.draw.compile(effects.grassTile.target),
-    effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
-    effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
+    effects.scene.compile(targets.scene), effects.brightPass.compile(level0.glow), effects.grassTile.draw.compile(effects.grassTile.target),
+    ...effects.bloom.flatMap((level, i) => {
+      const mine = targets.bloom[i]!;
+      return [level.down?.compile(mine.glow), level.blurH.compile(mine.temp), level.blurV.compile(mine.glow), level.up?.compile(mine.acc)];
+    }),
     effects.post.compile({ colors: [output.format] }),
   ]);
 }
 
 function renderChain(frame: Frame, effects: Effects, targets: Targets, output: Output): void {
   frame.pass({ target: targets.scene, clear: CLEAR }, (pass) => pass.draw(effects.scene));
-  frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
-  frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH1));
-  frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV1));
-  frame.pass({ target: targets.bloomB, clear: CLEAR }, (pass) => pass.draw(effects.blurH2));
-  frame.pass({ target: targets.bloomA, clear: CLEAR }, (pass) => pass.draw(effects.blurV2));
+  // Down the chain: bright pass into level 0, then downsample and blur each level.
+  frame.pass({ target: targets.bloom[0]!.glow, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
+  effects.bloom.forEach((level, i) => {
+    const mine = targets.bloom[i]!;
+    if (level.down) frame.pass({ target: mine.glow, clear: CLEAR }, (pass) => pass.draw(level.down!));
+    frame.pass({ target: mine.temp, clear: CLEAR }, (pass) => pass.draw(level.blurH));
+    frame.pass({ target: mine.glow, clear: CLEAR }, (pass) => pass.draw(level.blurV));
+  });
+  // Back up: the smallest level is its own accumulation, every other adds the one below.
+  const smallest = targets.bloom[BLOOM_LEVELS - 1]!;
+  frame.pass({ target: smallest.acc, clear: CLEAR }, (pass) => pass.draw(effects.bloom[BLOOM_LEVELS - 1]!.blurV));
+  for (let i = BLOOM_LEVELS - 2; i >= 0; i--) {
+    frame.pass({ target: targets.bloom[i]!.acc, clear: CLEAR }, (pass) => pass.draw(effects.bloom[i]!.up!));
+  }
   frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(effects.post));
 }
 
@@ -294,8 +344,13 @@ function renderFrame(gpu: Gpu, effects: Effects, targets: Targets, output: Targe
 function resizeTargets(targets: Targets, size: readonly [number, number]): void {
   const full = normalizeSize(size);
   targets.scene.resize(full);
-  targets.bloomA.resize(halfSize(full));
-  targets.bloomB.resize(halfSize(full));
+  let level = halfSize(full);
+  for (const mip of targets.bloom) {
+    mip.glow.resize(level);
+    mip.temp.resize(level);
+    mip.acc.resize(level);
+    level = halfSize(level);
+  }
 }
 
 function normalizeSize(size: readonly [number, number]): [number, number] {

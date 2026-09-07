@@ -21,7 +21,7 @@ const outDir = path.resolve(args.out ?? path.join(docsDir, '..', '..', 'artifact
 const width = Number(args.width ?? 1080);
 const height = Number(args.height ?? 1920);
 const cycleFrames = args.cycle ? Number(args.cycle) : 0;
-const cacheDir = path.join(docsDir, '.dreamcore-cache');
+const cacheDir = path.join(docsDir, '.dreamcore-cache', String(process.pid));   // per process, so renders can run side by side
 const DEBUG_MODES = { world: 1, map: 2, main: 3, 'main-clean': 4 };
 // --look '{"camera":{"height":1.7},"door":{"z":9}}' overrides the framing; --name prefixes the files.
 const look = args.look ? JSON.parse(args.look) : undefined;
@@ -80,7 +80,8 @@ async function loadExample() {
   await mkdir(cacheDir, { recursive: true });
   const entry = path.join(cacheDir, 'entry.ts');
   const bundle = path.join(cacheDir, 'example.mjs');
-  await writeFile(entry, "export { renderStill, phaseAt, CYCLE_SECONDS } from '../examples/dreamcore/example.ts';\n");
+  const example = path.relative(cacheDir, path.join(docsDir, 'examples', 'dreamcore', 'example.ts')).split(path.sep).join('/');
+  await writeFile(entry, `export { renderStill, phaseAt, CYCLE_SECONDS } from '${example}';\n`);
   await build({
     entryPoints: [entry],
     outfile: bundle,
