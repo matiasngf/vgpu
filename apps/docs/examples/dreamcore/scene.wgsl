@@ -407,14 +407,14 @@ fn portalHit(ro: vec3f, rd: vec3f, f: DoorFrame) -> f32 {
 // right behind the threshold so the opening is nothing but sand.
 fn duneHeight(p: vec2f) -> f32 {
   let crestWobble = 0.9 * sin(p.x * 0.55 + 1.0) + 1.4 * (fbm3(p * 0.09 + vec2f(2.0, 5.0)) - 0.5);
-  let start = 1.2 + 0.06 * sin(p.x * 1.3) + crestWobble * 0.3 + 0.15 * (fbm3(p * 0.8 + vec2f(5.0, 5.0)) - 0.5);
+  let start = 0.25 + 0.02 * sin(p.x * 1.3) + crestWobble * 0.12 + 0.06 * (fbm3(p * 0.8 + vec2f(5.0, 5.0)) - 0.5);
   let rise = p.y - start;
   // Flat sand at the threshold, a soft toe, then a 31 degree slip face.
-  let toe = 1.2;
+  let toe = 0.35;
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let face0 = toe * log(1.0 + exp(-start / toe));
   var h = 0.6 * (face - face0);
-  let swell = 0.3 + 0.7 * smoothstep(0.0, 4.0, rise);
+  let swell = 0.15 + 0.85 * smoothstep(0.0, 3.0, rise);
   h += 1.8 * (fbm3(p * 0.16 + vec2f(7.0, 1.0)) - 0.5) * swell;
   h += 0.4 * (fbm3(p * 0.42 + vec2f(1.0, 8.0)) - 0.5) * swell;
   h += 0.18 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 2.0, rise);
@@ -566,7 +566,7 @@ fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shad
     let toL = s - p;
     let d = max(length(toL), 0.05);
     let l = toL / d;
-    let facing = max(dot(f.fwd, l), 0.0);
+    let facing = pow(max(dot(f.fwd, l), 0.0), 1.6);
     let geom = facing / (d * d + 0.6);
     let ndl = dot(n, l);
     var diffuse = max(ndl, 0.0) + transl * max(-ndl, 0.0) + 0.12 * (1.0 - abs(ndl));
@@ -577,7 +577,7 @@ fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shad
     }
     var vis = 1.0;
     if (shadows) {
-      vis = doorShadow(p + n * 0.002, l, f, d - 0.3, 12.0);
+      vis = doorShadow(p + n * 0.002, l, f, d - 0.03, 40.0);
     }
     sum += geom * diffuse * vis;
   }
@@ -602,7 +602,7 @@ fn doorScatter(ro: vec3f, rd: vec3f, tEnd: f32, f: DoorFrame) -> vec3f {
       let toL = s - q;
       let d = max(length(toL), 0.3);
       let l = toL / d;
-      let facing = max(dot(f.fwd, l), 0.0);
+      let facing = pow(max(dot(f.fwd, l), 0.0), 1.6);
       // Henyey-Greenstein forward lobe: brightest when looking toward the door.
       let g = 0.45;
       let c = dot(l, rd);
@@ -751,7 +751,7 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   if (dayMix < 0.999) {
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
-    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.3, 12.0);
+    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0);
     var e2 = 0.0;
     var spec = 0.0;
     for (var j = 0; j < 3; j++) {
@@ -760,7 +760,7 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
       let toL = s - p;
       let d = max(length(toL), 0.05);
       let l = toL / d;
-      let facing = max(dot(f.fwd, l), 0.0);
+      let facing = pow(max(dot(f.fwd, l), 0.0), 1.6);
       let geom = facing / (d * d + 0.6);
       let tl = dot(tangent, l);
       let kk = sqrt(max(1.0 - tl * tl, 0.0));
