@@ -85,7 +85,7 @@ interface Targets {
 const BLOOM_LEVELS = 5;
 const BLOOM_SIGMA = 2.6;
 /** Weight of each level's own glow when summing back up; the small mips carry the wide halo. */
-const BLOOM_WEIGHTS = [0.9, 0.9, 1.0, 1.0, 1.0];
+const BLOOM_WEIGHTS = [0.45, 0.3, 0.25, 0.2, 0.2];   // per level, summing to about 1.4 so a large bright area does not pile up its own glow
 
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
@@ -101,10 +101,10 @@ export const LOOK = {
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
   /** Rippled flat sand, a backlit dune closing in from the right, a dune field to the horizon. */
-  plain: { tiltFrom: 3.0, tilt: 0.03, far: 1.2 },
-  dune: { start: 13.5, slope: 0.6, crest: 4.0, skew: 0.55 },
+  plain: { tiltFrom: 3.0, tilt: 0.03, far: 2.0 },
+  dune: { start: 13.5, slope: 0.5, crest: 2.5, skew: 0.55 },
   sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
-  post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  post: { exposure: 1.3, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
