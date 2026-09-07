@@ -431,9 +431,16 @@ fn duneHeight(p: vec2f) -> f32 {
   let face0 = toe * log(1.0 + exp(-start / toe));
   let crest = max(params.dune.z, 0.1);
   h += crest * tanh(params.dune.y * (face - face0) / crest);
-  // A low dune field rolls on behind the first crest toward the horizon.
+  // Dune field behind the first crest: asymmetric dunes (a 10 degree stoss side, a 31 degree
+  // slip face) about 34 m apart with wandering crests, sitting at the far field level.
   let far = smoothstep(params.dune.x + 4.5, params.dune.x + 17.5, z);
-  h += far * (1.1 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + params.dune.w);
+  let fieldDir = vec2f(0.85, 0.53);
+  let fw = 6.0 * (fbm3(p * 0.03 + vec2f(9.0, 2.0)) - 0.5);
+  let u = fract((dot(p, fieldDir) + fw) / 34.0 + 0.3);
+  let stoss = 0.78;
+  let prof = select((1.0 - u) / (1.0 - stoss), u / stoss, u < stoss);
+  let fieldAmp = 4.5 * (0.55 + 0.45 * fbm3(p * 0.02 + vec2f(4.0, 6.0)));
+  h += far * (fieldAmp * prof - 2.2 + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + params.dune.w);
   // Small-scale roughness on the slopes only; the flat sand keeps its clean ripples.
   h += 0.08 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 3.0, rise);
   return h;
@@ -451,7 +458,7 @@ fn duneGradient(p: vec2f) -> vec2f {
 // side and a steeper lee side, meandering and pinching off into Y junctions. The sand sun
 // rakes across them so the lee sides cast the wide, soft shadow bands of the photo.
 const RIPPLE_LEN: f32 = 0.80;
-const RIPPLE_AMP: f32 = 0.012;
+const RIPPLE_AMP: f32 = 0.015;
 const RIPPLE_DIR: vec2f = vec2f(0.760, 0.650);   // across the crests, roughly along the sand sun
 
 struct Ripples {
@@ -529,12 +536,12 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   return 0.5 * (a + b);
 }
 
-const SAND_HORIZON: vec3f = vec3f(0.68, 0.60, 0.49);   // warm haze at the desert horizon
+const SAND_HORIZON: vec3f = vec3f(0.78, 0.50, 0.30);   // sunset haze at the desert horizon
 
 // Desert sky seen through the opening: warm haze low, blue above, the low sun glowing.
 fn sandSky(rd: vec3f) -> vec3f {
   let t = clamp(rd.y, 0.0, 1.0);
-  var col = mix(SAND_HORIZON, vec3f(0.26, 0.42, 0.72), pow(t, 0.55));
+  var col = mix(SAND_HORIZON, vec3f(0.30, 0.45, 0.70), pow(t, 0.45));
   let s = max(dot(rd, sandSun()), 0.0);
   col += vec3f(1.0, 0.9, 0.7) * (0.18 * pow(s, 8.0) + 0.5 * pow(s, 200.0));
   return col;
@@ -547,9 +554,8 @@ fn sandSun() -> vec3f {
 }
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
-  // Pale quartz sand measured off the close-up: the warmth is in the light, not the grains.
-  // Lit sand lands near sRGB (236,212,165), the shadow bands near (106,69,43).
-  var albedo = rgb8(218.0, 206.0, 170.0);
+  // Orange desert sand at sunset, lit sand near sRGB (212,120,40), shadows deep brown.
+  var albedo = rgb8(214.0, 142.0, 62.0);
   albedo *= 0.94 + 0.12 * fbm3(p.xz * 0.7 + vec2f(4.0, 2.0));
   let grainFade = 1.0 - smoothstep(0.002, 0.014, footprint);
   // Grains: a fine speckle plus a coarser clumping, both fading before they can alias.
@@ -557,8 +563,8 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   albedo *= 1.0 + grain * grainFade;
 
   let sun = sandSun();
-  let sunCol = vec3f(1.0, 0.97, 0.90) * 1.3;
-  let amb = vec3f(0.205, 0.096, 0.057) * 1.3;    // bounce off the surrounding sand
+  let sunCol = vec3f(1.0, 0.84, 0.62) * 1.5;      // sunset sun
+  let amb = vec3f(0.28, 0.15, 0.09) * 1.5;        // bounce off the surrounding sand
   let slope = duneGradient(p.xz);
   let r = ripples(p.xz, footprint);
   let n = normalize(vec3f(-(slope.x + r.grad.x), 1.0, -(slope.y + r.grad.y)));
