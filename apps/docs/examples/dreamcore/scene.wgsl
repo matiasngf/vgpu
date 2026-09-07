@@ -303,21 +303,30 @@ fn grassCoverage(xz: vec2f) -> f32 {
   return clump * inPatch * near;
 }
 
-// Comb direction of the flattened grass: a prevailing direction with gentle waves.
-fn combDir(xz: vec2f) -> vec2f {
-  let a = PI * 0.78 + 0.4 * (fbm3(xz * 0.07 + vec2f(3.0, 1.0)) - 0.5) + 0.08 * sin(xz.x * 0.9 + xz.y * 0.4);
+// Prevailing comb direction of the flattened grass (shared with the far-field streaks).
+fn combDir() -> vec2f {
+  let a = PI * 0.78;
   return vec2f(sin(a), cos(a));
+}
+
+// Slow drift of the lay: a displacement of the tile domain rather than a rotation, so the
+// distortion stays the same everywhere instead of growing with the distance to the door.
+fn combWarp(xz: vec2f) -> vec2f {
+  return 0.6 * vec2f(fbm3(xz * 0.045 + vec2f(3.0, 1.0)) - 0.5, fbm3(xz * 0.045 + vec2f(8.0, 5.0)) - 0.5)
+       + 0.08 * vec2f(sin(xz.x * 0.9 + xz.y * 0.4), cos(xz.x * 0.5 - xz.y * 0.7));
 }
 
 struct GrassFrame {
   dir: vec2f,      // world direction the tile's +x maps to
+  offset: vec2f,   // tile-space displacement of the lay at this ray
   cover: f32,
   scale: f32,      // tile height to scene height
 }
 
 fn grassFrame(xz: vec2f) -> GrassFrame {
   var g: GrassFrame;
-  g.dir = combDir(xz);
+  g.dir = combDir();
+  g.offset = combWarp(xz);
   g.cover = grassCoverage(xz);
   g.scale = params.grass.y / TILE_HEIGHT;
   return g;
@@ -325,7 +334,7 @@ fn grassFrame(xz: vec2f) -> GrassFrame {
 
 fn grassUV(xz: vec2f, g: GrassFrame) -> vec2f {
   let rel = xz - params.door.xy;
-  let local = vec2f(dot(rel, g.dir), dot(rel, vec2f(-g.dir.y, g.dir.x)));
+  let local = vec2f(dot(rel, g.dir), dot(rel, vec2f(-g.dir.y, g.dir.x))) + g.offset;
   return vec2f(local.x / TILE_SIZE, 1.0 - local.y / TILE_SIZE);
 }
 
