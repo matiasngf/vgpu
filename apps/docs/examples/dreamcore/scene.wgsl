@@ -421,17 +421,18 @@ fn duneHeight(p: vec2f) -> f32 {
   let z = p.y;
   // Flat sand level with the field at the threshold, gently undulating further in.
   var h = 0.05 * (fbm3(p * 0.3 + vec2f(7.0, 1.0)) - 0.5) * smoothstep(0.0, 2.0, z);
-  // First dune: a soft toe about 4.5 m in, a 19 degree stoss face, a rounded crest near 1.9 m.
+  // First dune: a soft toe about 4.5 m in, a 19 degree stoss face, a rounded crest near 2.8 m,
+  // tall enough to fill the opening from standing height so no desert sky shows.
   let start = 4.5 + 0.8 * sin(p.x * 0.35 + 1.0) + 0.8 * (fbm3(p * 0.15 + vec2f(2.0, 5.0)) - 0.5);
   let toe = 1.2;
   let rise = z - start;
   let face = max(rise, 0.0) + toe * log(1.0 + exp(-abs(rise) / toe));
   let face0 = toe * log(1.0 + exp(-start / toe));
-  let crest = 1.9;
+  let crest = 2.8;
   h += crest * tanh(0.34 * (face - face0) / crest);
   // A low dune field rolls on behind the first crest toward the horizon.
   let far = smoothstep(9.0, 22.0, z);
-  h += far * (1.6 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.7 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + 0.4);
+  h += far * (1.1 * (fbm3(p * 0.05 + vec2f(3.0, 9.0)) - 0.5) + 0.5 * (fbm3(p * 0.14 + vec2f(1.0, 8.0)) - 0.5) + 1.0);
   // Small-scale roughness on the slopes only; the flat sand keeps its clean ripples.
   h += 0.08 * (fbm3(p * 0.9 + vec2f(3.0, 9.0)) - 0.5) * smoothstep(0.0, 3.0, rise);
   return h;
