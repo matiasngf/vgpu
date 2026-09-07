@@ -287,7 +287,7 @@ fn doorShadow(p: vec3f, l: vec3f, f: DoorFrame, maxT: f32, k: f32) -> f32 {
 // described by a density function inside a slab above the ground, ray marched with
 // front-to-back compositing. Combing shifts the strand pattern with height so strands lie
 // along the comb direction instead of standing up.
-const FUR_COMB: f32 = 2.6;      // horizontal strand drift per metre of height (nearly flat)
+const FUR_COMB: f32 = 1.7;      // horizontal strand drift per metre of height (lying down)
 const FUR_SIGMA: f32 = 150.0;   // extinction inside a strand-dense region (1/m)
 
 // Local fur coverage: clumpy, fading toward the edge of the fur patch around the door.
@@ -308,20 +308,23 @@ struct FurSample {
   strand: f32,   // strand pattern value, for per-strand colour variation
 }
 
-fn furDensity(p: vec3f, dir: vec2f, cover: f32) -> FurSample {
+fn furDensity(p: vec3f, dir: vec2f, cover: f32, fineMix: f32) -> FurSample {
   var s: FurSample;
   let h = max(params.grass.y, 0.01);
   let hf = clamp(p.y / h, 0.0, 1.0);
   // Combing: the pattern drifts along the comb direction as we go up, so a strand column
   // becomes a strand lying along `dir`.
   let q = p.xz - dir * (p.y * FUR_COMB);
-  // Strand pattern stretched along the comb direction: brushed streaks, not speckle.
+  // Strand pattern stretched along the comb direction: brushed streaks, not speckle. The fine
+  // octave fades out where a pixel is wider than a strand, which keeps far rows from aliasing.
   let perp = vec2f(-dir.y, dir.x);
-  let u = vec2f(dot(q, dir) * 0.3, dot(q, perp));
-  let strand = vnoise(u * 125.0) * 0.65 + vnoise(u * 250.0 + vec2f(7.3, 2.1)) * 0.35;
+  let u = vec2f(dot(q, dir) * 0.45, dot(q, perp));
+  let coarse = vnoise(u * 90.0);
+  let fine = vnoise(u * 190.0 + vec2f(7.3, 2.1));
+  let strand = mix(coarse, coarse * 0.65 + fine * 0.35, fineMix);
   let lenVar = 0.55 + 0.45 * vnoise(q * 14.0 + vec2f(3.0, 5.0));
   let d = strand * lenVar * cover - hf * 0.85;
-  s.density = clamp(d * 6.0, 0.0, 1.0);
+  s.density = clamp(d * 3.5, 0.0, 1.0);
   s.strand = strand;
   return s;
 }
@@ -346,13 +349,17 @@ fn furAlbedo(hf: f32, strand: f32) -> vec3f {
 }
 
 // March the fur slab between tEnter and tExit along the ray and composite front to back.
-fn furMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, f: DoorFrame, dayMix: f32, rim: f32) -> FurResult {
+fn furMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, f: DoorFrame, dayMix: f32, rim: f32, pixelAngle: f32) -> FurResult {
   var res: FurResult;
   res.color = vec3f(0.0);
   res.alpha = 0.0;
   if (tExit <= tEnter) { return res; }
-  let steps = select(28, 56, params.grass.z > 0.5);
+  let steps = select(40, 88, params.grass.z > 0.5);
   let dt = (tExit - tEnter) / f32(steps);
+  // Per-ray start jitter turns step banding into fine noise that supersampling averages out.
+  let jitter = hash13(rd * 977.0) * dt;
+  let footprint = pixelAngle * tExit;
+  let fineMix = 1.0 - smoothstep(0.003, 0.009, footprint);
   let h = max(params.grass.y, 0.01);
   // Per-ray constants: the comb field and coverage vary slowly, so sample them once at the
   // ground point; shadows from the door are evaluated once as well.
@@ -381,9 +388,10 @@ fn furMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, f: DoorFrame, dayMix:
   var T = 1.0;
   var col = vec3f(0.0);
   for (var i = 0; i < steps; i++) {
-    let t = tEnter + (f32(i) + 0.5) * dt;
+    let t = tEnter + f32(i) * dt + jitter;
+    if (t > tExit) { break; }
     let p = ro + rd * t;
-    let fs = furDensity(p, dir, cover);
+    let fs = furDensity(p, dir, cover, fineMix);
     if (fs.density < 0.002) { continue; }
     let hf = clamp(p.y / h, 0.0, 1.0);
     let albedo = furAlbedo(hf, fs.strand);
@@ -850,7 +858,7 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
     // The grass fur volume sits on the ground in front of whatever was hit.
     let iv = furInterval(ro, rd, t);
     if (iv.y > iv.x) {
-      let fur = furMarch(ro, rd, iv.x, iv.y, f, dayMix, rim);
+      let fur = furMarch(ro, rd, iv.x, iv.y, f, dayMix, rim, pixelAngle);
       color = fur.color + color * (1.0 - fur.alpha);
     }
     // Aerial perspective: night haze is heavier than the crisp day.
