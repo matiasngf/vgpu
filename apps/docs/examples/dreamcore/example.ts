@@ -26,6 +26,8 @@ export interface DreamcoreFrameOptions {
   grassShadows?: boolean;
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;
+  /** Debug views of the sand world behind the door: 1 = free camera at a door-local position, 2 = top-down map. */
+  debug?: { mode: 1 | 2; camera?: readonly [number, number, number] };
 }
 
 interface Effects {
@@ -64,6 +66,9 @@ export const LOOK = {
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
 export const CYCLE_SECONDS = 16;
+
+/** Default free-camera position (door-local metres) for the sand-world debug view. */
+const DEBUG_CAMERA: readonly [number, number, number] = [-5.5, 2.6, -3.5];
 
 export function phaseAt(seconds: number): number {
   const t = ((seconds % CYCLE_SECONDS) + CYCLE_SECONDS) % CYCLE_SECONDS;
@@ -180,6 +185,7 @@ function setConstants(effects: Effects): void {
       door: [door.x, door.z, door.yaw, door.leaf],
       look: [sun.azimuth, sun.elevation, LOOK.texture, LOOK.doorLight],
       grass: [grass.radius, grass.height, 1, 0],
+      debug: [0, 0, 0, 0],
     },
   });
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
@@ -218,11 +224,14 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
       phase,
       camera: [camera.height, camera.pitch, camera.fovY, frame.samples ?? 1],
       grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, frame.wind ?? 0],
+      debug: frame.debug ? [frame.debug.mode, ...(frame.debug.camera ?? DEBUG_CAMERA)] : [0, 0, 0, 0],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
   effects.brightPass.set({ bright: { threshold: post.nightThreshold + (post.dayThreshold - post.nightThreshold) * phase } });
-  effects.post.set({ post: { seed: 0.37 + (frame.time ?? 0) * 0.01 } });
+  // Debug views skip the photographic finish so they stay readable.
+  const finish = frame.debug ? { bloomStrength: 0, grain: 0, vignette: 0 } : { bloomStrength: post.bloomStrength, grain: post.grain, vignette: post.vignette };
+  effects.post.set({ post: { seed: 0.37 + (frame.time ?? 0) * 0.01, ...finish } });
 }
 
 async function prewarm(effects: Effects, targets: Targets, output: Output): Promise<void> {

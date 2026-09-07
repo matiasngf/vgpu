@@ -25,19 +25,21 @@ const cacheDir = path.join(docsDir, '.dreamcore-cache');
 
 await mkdir(outDir, { recursive: true });
 const { renderStill, phaseAt, CYCLE_SECONDS } = await loadExample();
-const steps = cycleFrames > 0
-  ? Array.from({ length: cycleFrames }, (_, i) => {
-    const time = (i / cycleFrames) * CYCLE_SECONDS;
-    return { phase: phaseAt(time), time, name: `cycle-${String(i).padStart(3, '0')}` };
-  })
-  : String(args.phases ?? '0,0.3,1').split(',').map(Number).map((phase) => ({ phase, time: 0, name: phaseName(phase) }));
+const steps = args.debug
+  ? debugSteps(args.debug, args['debug-cam'])
+  : cycleFrames > 0
+    ? Array.from({ length: cycleFrames }, (_, i) => {
+      const time = (i / cycleFrames) * CYCLE_SECONDS;
+      return { phase: phaseAt(time), time, name: `cycle-${String(i).padStart(3, '0')}` };
+    })
+    : String(args.phases ?? '0,0.3,1').split(',').map(Number).map((phase) => ({ phase, time: 0, name: phaseName(phase) }));
 const frames = [];
-for (const { phase, time, name } of steps) {
+for (const { phase, time, name, debug } of steps) {
   const gpu = await init();
   try {
     const target = gpu.target({ size: [width, height], format: 'rgba8unorm', label: `dreamcore-${name}` });
     const started = Date.now();
-    await renderStill(gpu, target, { phase, time, samples: 4 });
+    await renderStill(gpu, target, { phase, time, samples: 4, debug });
     const pixels = await target.read();
     const file = path.join(outDir, `dreamcore.${name}.png`);
     await writePng(file, pixels, width, height);
@@ -47,7 +49,7 @@ for (const { phase, time, name } of steps) {
     gpu.dispose();
   }
 }
-if (frames.length > 1 && cycleFrames === 0) {
+if (frames.length > 1 && cycleFrames === 0 && !args.debug) {
   const gap = 8;
   const stripWidth = frames.length * width + (frames.length - 1) * gap;
   const strip = new Uint8Array(stripWidth * height * 4).fill(24);
@@ -96,6 +98,16 @@ async function loadExample() {
     logLevel: 'silent',
   });
   return import(pathToFileURL(bundle).href);
+}
+
+// --debug world | map | all [--debug-cam x,y,z]: views of the sand world behind the door.
+function debugSteps(spec, cam) {
+  const modes = spec === 'all' ? ['world', 'map'] : [spec];
+  const camera = cam ? cam.split(',').map(Number) : undefined;
+  return modes.map((name) => {
+    if (name !== 'world' && name !== 'map') throw new Error(`Unknown debug view '${name}' (world, map or all).`);
+    return { phase: 0, time: 0, name: `debug-${name}`, debug: { mode: name === 'map' ? 2 : 1, camera } };
+  });
 }
 
 function parseArgs(argv) {
