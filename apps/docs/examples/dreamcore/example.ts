@@ -22,9 +22,9 @@ export interface DreamcoreFrameOptions {
   phase: number;
   /** Seconds, only drives film grain. */
   time?: number;
-  /** 1 sample per pixel for live rendering, 4 for stills. */
-  samples?: 1 | 4;
-  /** Full-quality grass march (56 steps); off halves the steps for a cheaper live frame. */
+  /** Samples per pixel: 1 for live rendering, 4 for quick stills, 9 or 16 for final renders. */
+  samples?: 1 | 4 | 9 | 16;
+  /** Full-quality grass march (96 steps); off drops to 28 steps for a cheaper live frame. */
   grassShadows?: boolean;
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;

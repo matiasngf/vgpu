@@ -222,11 +222,14 @@ fn sdDoor(p: vec3f, f: DoorFrame) -> f32 {
                     vec3f(hw + FRAME_T, (DOOR_H + FRAME_T) * 0.5 + 0.05, FRAME_D)) - 0.004;
   let opening = sdBox(q - vec3f(0.0, DOOR_H * 0.5 - 0.1, 0.0), vec3f(hw, DOOR_H * 0.5 + 0.1, 1.0));
   var d = max(outer, -opening);
-  // Leaf hinged on the right jamb, swung toward the viewer by params.door.w.
+  // Leaf hinged on the right jamb, swung toward the viewer by params.door.w. The hinge axis
+  // sits at the front inner corner of the jamb, like a real door: closed, the leaf lies flush
+  // with the front face inside the opening; open, it stays on the jamb instead of floating off
+  // its outer edge.
   let a = params.door.w;
   let u = vec3f(-cos(a), 0.0, -sin(a));
   let n = vec3f(-u.z, 0.0, u.x);
-  let hinge = vec3f(hw, 0.0, 0.0);
+  let hinge = vec3f(hw - 0.006, 0.0, -FRAME_D + LEAF_D);
   let r = q - hinge;
   let l = vec3f(dot(r, u), r.y, dot(r, n));
   let leafBox = vec3f(l.x - hw, l.y - DOOR_H * 0.5 - 0.005, l.z);
@@ -356,7 +359,7 @@ fn grassSurface(p: vec3f, g: GrassFrame) -> f32 {
 // Relief march of the blade heightfield, which rides on the terrain, between tEnter and the
 // terrain hit tExit.
 fn grassMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, g: GrassFrame) -> f32 {
-  let steps = select(28, 56, params.grass.z > 0.5);
+  let steps = select(28, 96, params.grass.z > 0.5);
   let dt = (tExit - tEnter) / f32(steps);
   let jitter = hash13(rd * 977.0) * dt;
   var tPrev = tEnter;
@@ -451,9 +454,9 @@ fn duneHeight(p: vec2f) -> f32 {
   h += crest * tanh(slope * face / crest) * (1.0 - smoothstep(back, back + 30.0, rise));
   // A tall dune off to the right, outside the door's view, standing against the sun: the band of
   // shadow that crosses the hollow is its.
-  let side = p.x - 13.0 + 0.15 * (z - 20.0) + 2.0 * (fbm3(p * 0.05 + vec2f(2.0, 9.0)) - 0.5);
+  let side = p.x - 10.0 + 0.15 * (z - 20.0) + 2.0 * (fbm3(p * 0.05 + vec2f(2.0, 9.0)) - 0.5);
   let sideFace = max(side, 0.0) + toe * log(1.0 + exp(-abs(side) / toe));
-  h += 11.0 * tanh(sideFace / 11.0) * smoothstep(20.0, 30.0, z) * (1.0 - smoothstep(60.0, 110.0, z));
+  h += 12.0 * tanh(sideFace / 12.0) * smoothstep(16.0, 26.0, z) * (1.0 - smoothstep(60.0, 110.0, z));
   // A big dune far behind the door, its face toward us, so the opening looks at dunes all the
   // way up instead of sky.
   let farRise = z - 100.0 + 0.25 * p.x + 6.0 * (fbm3(p * 0.012 + vec2f(5.0, 1.0)) - 0.5);
@@ -577,9 +580,9 @@ fn ripples(p: vec2f, footprint: f32) -> Ripples {
 fn rippleShadow(p: vec2f, r: Ripples, sun: vec3f, slope: vec2f) -> f32 {
   if (r.amp < 1e-5) { return 1.0; }
   let len = max(params.sand.y, 0.02);
-  let dt = len * 0.12;
+  let dt = len * 0.08;
   var s = 1.0;
-  for (var i = 1; i <= 8; i++) {
+  for (var i = 1; i <= 12; i++) {
     let t = f32(i) * dt;
     let q = p + sun.xz * t;
     let hq = rippleHeightAt(q, r);
@@ -593,12 +596,12 @@ fn rippleShadow(p: vec2f, r: Ripples, sun: vec3f, slope: vec2f) -> f32 {
 fn duneShadow(p: vec3f, sun: vec3f) -> f32 {
   var s = 1.0;
   var t = 0.4;
-  for (var i = 0; i < 26; i++) {
+  for (var i = 0; i < 40; i++) {
     let q = p + sun * t;
     let d = q.y - duneHeight(q.xz);
     s = min(s, clamp(32.0 * d / t, 0.0, 1.0));   // a penumbra of about 2 degrees
     if (s < 0.01 || t > 90.0) { break; }
-    t += max(0.35, t * 0.22);
+    t += max(0.25, t * 0.15);
   }
   return s;
 }
@@ -642,9 +645,9 @@ fn sandSky(rd: vec3f) -> vec3f {
 }
 
 fn sandSun() -> vec3f {
-  // Low sun (16 degrees) from the right and behind the dunes: the near faces sit in shadow,
+  // Low sun (22 degrees) from the right and behind the dunes: the near faces sit in shadow,
   // their shadows fall across the flat sand, and the ripples light up on their far sides.
-  return normalize(vec3f(0.85, 0.27, 0.45));
+  return normalize(vec3f(0.85, 0.39, 0.45));
 }
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
@@ -654,7 +657,7 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   var albedo = rgb8(205.0, 140.0, 72.0);
   albedo *= 0.93 + 0.14 * fbm3(p.xz * 0.7 + vec2f(4.0, 2.0));
   let sun = sandSun();
-  let sunCol = vec3f(1.0, 0.86, 0.66) * 2.6;
+  let sunCol = vec3f(1.0, 0.86, 0.66) * 1.9;
   let amb = vec3f(0.14, 0.19, 0.34) * 0.75;           // pale sky in the shadows
   let slope = duneGradient(p.xz);
   let r = ripples(p.xz, footprint);
@@ -693,7 +696,7 @@ fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
   }
   let p = ro + rd * t;
   let col = shadeSand(p, rd, pixelAngle * (tBase + t));
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0035));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025));
 }
 
 // ---------------------------------------------------------------- lighting
@@ -747,17 +750,19 @@ fn dayFront(p: vec3f, f: DoorFrame) -> vec2f {
   return vec2f(day, rim);
 }
 
-const DOOR_SAMPLES: array<vec2f, 3> = array<vec2f, 3>(vec2f(-0.22, 0.42), vec2f(0.21, 1.12), vec2f(-0.07, 1.78));
+const DOOR_SAMPLE_COUNT: i32 = 6;
+const DOOR_SAMPLES: array<vec2f, 6> = array<vec2f, 6>(
+  vec2f(-0.23, 0.35), vec2f(0.23, 0.35), vec2f(-0.23, 1.04), vec2f(0.23, 1.04), vec2f(-0.23, 1.73), vec2f(0.23, 1.73));
 
 // Light from the sunlit dune pouring through the opening: a warm rectangular area light
-// sampled at three points, each with its own shadow ray, so penumbras stay soft.
+// sampled at six points, each with its own shadow ray, so penumbras stay soft.
 // `tangent` enables Kajiya-Kay fibre shading for blades (zero vector for surfaces).
 fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shadows: bool) -> vec3f {
   let front = dot(p - f.origin, f.fwd);
   if (front > -0.01) { return vec3f(0.0); }
   let fibre = dot(tangent, tangent) > 0.5;
   var sum = 0.0;
-  for (var i = 0; i < 3; i++) {
+  for (var i = 0; i < DOOR_SAMPLE_COUNT; i++) {
     let o = DOOR_SAMPLES[i];
     let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
     let toL = s - p;
@@ -778,7 +783,7 @@ fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shad
     }
     sum += geom * diffuse * vis;
   }
-  return DOOR_COLOR * params.look.w * sum / 3.0;
+  return DOOR_COLOR * params.look.w * sum / f32(DOOR_SAMPLE_COUNT);
 }
 
 // Single scattering of the door light in the night air along the primary ray: the haze
@@ -793,7 +798,7 @@ fn doorScatter(ro: vec3f, rd: vec3f, tEnd: f32, f: DoorFrame) -> vec3f {
     let q = ro + rd * tt;
     if (dot(q - f.origin, f.fwd) > -0.01) { continue; }
     var e = 0.0;
-    for (var j = 0; j < 3; j++) {
+    for (var j = 0; j < DOOR_SAMPLE_COUNT; j++) {
       let o = DOOR_SAMPLES[j];
       let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
       let toL = s - q;
@@ -806,7 +811,7 @@ fn doorScatter(ro: vec3f, rd: vec3f, tEnd: f32, f: DoorFrame) -> vec3f {
       let phase = (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * c, 1.5));
       e += facing / (d * d + 0.6) * phase;
     }
-    acc += e / 3.0 * dt;
+    acc += e / f32(DOOR_SAMPLE_COUNT) * dt;
   }
   return DOOR_COLOR * params.look.w * acc * 0.005;
 }
@@ -913,9 +918,9 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
 // Blades shadowing blades: walk toward the light through the heightfield. The plain is
 // flat under the patch, so only the blade height changes along the short walk.
 fn grassSelfShadow(p: vec3f, l: vec3f, g: GrassFrame, base: f32, seed: f32) -> f32 {
-  let dt = 0.045;
+  let dt = 0.025;
   var s = 1.0;
-  for (var i = 0; i < 8; i++) {
+  for (var i = 0; i < 16; i++) {
     let q = p + l * ((f32(i) + 0.35 + 0.65 * seed) * dt);
     let surf = base + grassHeight(q.xz, g);
     s = min(s, clamp((q.y - surf) / 0.025 + 0.5, 0.0, 1.0));
@@ -965,12 +970,18 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   if (dayMix < 0.999) {
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
-    let sMid = f.origin + f.right * DOOR_SAMPLES[1].x + vec3f(0.0, DOOR_SAMPLES[1].y, 0.0);
-    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0)
-      * grassSelfShadow(p, normalize(sMid - p), g, base, seed);
+    // Near the door every light sample gets its own shadow ray through the leaf and the
+    // blades, so the leaf's shadow has a real penumbra; further out, where the spill is
+    // faint, one ray toward the centre is enough.
+    let near = length(toDoorC) < 14.0;
+    var doorSh = 1.0;
+    if (!near) {
+      let lc = normalize(toDoorC);
+      doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), lc, f, length(toDoorC) - 0.03, 40.0) * grassSelfShadow(p, lc, g, base, seed);
+    }
     var e2 = 0.0;
     var spec = 0.0;
-    for (var j = 0; j < 3; j++) {
+    for (var j = 0; j < DOOR_SAMPLE_COUNT; j++) {
       let o = DOOR_SAMPLES[j];
       let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
       let toL = s - p;
@@ -982,14 +993,18 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
       let kk = sqrt(max(1.0 - tl * tl, 0.0));
       let lam = max(dot(n, l), 0.0) + 0.05;
       let tr = grassTransmittance(hf, l, g.cover);
-      e2 += geom * mix(lam, kk, 0.3) * tr;
+      var vis = doorSh;
+      if (near) {
+        vis = doorShadow(p + vec3f(0.0, 0.02, 0.0), l, f, d - 0.03, 40.0) * grassSelfShadow(p, l, g, base, seed);
+      }
+      e2 += geom * mix(lam, kk, 0.3) * tr * vis;
       let hl = normalize(l + v);
       let th = dot(tangent, hl);
-      spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 16.0) * tr;
+      spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 16.0) * tr * vis;
     }
     let front = dot(p - f.origin, f.fwd);
     let inFront = select(0.0, 1.0, front < -0.01);
-    night += albedo * DOOR_COLOR * params.look.w * (e2 * 0.333 + spec * 0.1) * doorSh * inFront;
+    night += albedo * DOOR_COLOR * params.look.w * (e2 + spec * 0.3) / f32(DOOR_SAMPLE_COUNT) * inFront;
   }
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
@@ -1151,7 +1166,7 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec
   if (overlays > 1) {
     col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
   }
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(tDune - 30.0, 0.0) * 0.0035));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(tDune - 30.0, 0.0) * 0.0025));
 }
 
 // Top-down map of the sand world: x in [-6, 6], z in [-2, 22] (camera side at the bottom),
@@ -1194,13 +1209,11 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
 
   let samples = u32(max(params.camera.w, 1.0));
   var acc = vec3f(0.0);
-  let n = select(1u, 2u, samples >= 4u);
+  // 1, 2x2, 3x3 or 4x4 samples per pixel.
+  let n = select(select(select(1u, 2u, samples >= 4u), 3u, samples >= 9u), 4u, samples >= 16u);
   let count = n * n;
   for (var i = 0u; i < count; i++) {
-    var offset = vec2f(0.5);
-    if (n == 2u) {
-      offset = vec2f(0.25 + 0.5 * f32(i % 2u), 0.25 + 0.5 * f32(i / 2u));
-    }
+    let offset = (vec2f(f32(i % n), f32(i / n)) + vec2f(0.5)) / f32(n);
     let px = uv * res + offset - vec2f(0.5);
     let ndc = (px / res) * 2.0 - 1.0;
     let sx = ndc.x * aspect;

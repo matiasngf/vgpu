@@ -1,6 +1,6 @@
 // Headless keyframe renderer for the Dreamcore example.
 //
-//   node apps/docs/scripts/render-dreamcore.mjs [--out <dir>] [--width 1080 --height 1920] [--phases 0,0.3,1]
+//   node apps/docs/scripts/render-dreamcore.mjs [--out <dir>] [--width 1080 --height 1920] [--phases 0,0.3,1] [--samples 16]
 //   node apps/docs/scripts/render-dreamcore.mjs --cycle 40 --width 405 --height 720
 //
 // Writes one PNG per phase (0 = night, 1 = day) plus a side-by-side triptych, or with
@@ -26,6 +26,8 @@ const DEBUG_MODES = { world: 1, map: 2, main: 3, 'main-clean': 4 };
 // --look '{"camera":{"height":1.7},"door":{"z":9}}' overrides the framing; --name prefixes the files.
 const look = args.look ? JSON.parse(args.look) : undefined;
 const prefix = args.name ? `${args.name}.` : '';
+// --samples 4 | 9 | 16: samples per pixel (16 by default, this is an offline render).
+const samples = Number(args.samples ?? 16);
 
 await mkdir(outDir, { recursive: true });
 const { renderStill, phaseAt, CYCLE_SECONDS } = await loadExample();
@@ -43,7 +45,7 @@ for (const { phase, time, name, debug } of steps) {
   try {
     const target = gpu.target({ size: [width, height], format: 'rgba8unorm', label: `dreamcore-${name}` });
     const started = Date.now();
-    await renderStill(gpu, target, { phase, time, samples: 4, debug, look });
+    await renderStill(gpu, target, { phase, time, samples, debug, look });
     const pixels = await target.read();
     const file = path.join(outDir, `dreamcore.${prefix}${name}.png`);
     await writePng(file, pixels, width, height);
