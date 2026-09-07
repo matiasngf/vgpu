@@ -213,7 +213,7 @@ const QUALITY: Record<ThrusterQuality, {
     plume: 'direct',
     fireScale: 1.0,
     bloomHeight: 480,
-    bloom: { strength: 1.85, threshold: 0.65, radius: 2.0 },
+    bloom: { strength: 1.3, threshold: 0.8, radius: 1.5 },
     ao: { radius: 2.0, intensity: 4.5, bias: 0.08 },
     post: { grain: 0.085, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
     composite: { vignette: 0, grain: 0 },
