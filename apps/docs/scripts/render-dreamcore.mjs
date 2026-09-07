@@ -22,12 +22,14 @@ const width = Number(args.width ?? 1080);
 const height = Number(args.height ?? 1920);
 const cycleFrames = args.cycle ? Number(args.cycle) : 0;
 const cacheDir = path.join(docsDir, '.dreamcore-cache', String(process.pid));   // per process, so renders can run side by side
-const DEBUG_MODES = { world: 1, map: 2, main: 3, 'main-clean': 4 };
+const DEBUG_MODES = { world: 1, map: 2, main: 3, 'main-clean': 4, blades: 5 };
 // --look '{"camera":{"height":1.7},"door":{"z":9}}' overrides the framing; --name prefixes the files.
 const look = args.look ? JSON.parse(args.look) : undefined;
 const prefix = args.name ? `${args.name}.` : '';
 // --samples 4 | 9 | 16: samples per pixel (16 by default, this is an offline render).
 const samples = Number(args.samples ?? 16);
+// --blades N: geometric blades near the camera (900k by default; 0 keeps the relief only).
+const blades = Number(args.blades ?? 900000);
 
 await mkdir(outDir, { recursive: true });
 const { renderStill, phaseAt, CYCLE_SECONDS } = await loadExample();
@@ -45,7 +47,7 @@ for (const { phase, time, name, debug } of steps) {
   try {
     const target = gpu.target({ size: [width, height], format: 'rgba8unorm', label: `dreamcore-${name}` });
     const started = Date.now();
-    await renderStill(gpu, target, { phase, time, samples, debug, look });
+    await renderStill(gpu, target, { phase, time, samples, blades: debug && debug.mode !== 5 ? 0 : blades, debug, look });
     const pixels = await target.read();
     const file = path.join(outDir, `dreamcore.${prefix}${name}.png`);
     await writePng(file, pixels, width, height);

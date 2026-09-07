@@ -1,10 +1,11 @@
-import type { Effect, Frame, Gpu, Surface, Target } from 'vgpu';
+import type { Draw, Effect, Frame, Gpu, Surface, Target } from 'vgpu';
 
 import bloomBlurWgsl from './bloom-blur.wgsl';
 import bloomDownWgsl from './bloom-down.wgsl';
 import bloomUpWgsl from './bloom-up.wgsl';
 import brightPassWgsl from './bright-pass.wgsl';
-import { createGrassTile, renderGrassTile, type GrassTile } from './grass-tile';
+import grassBladesWgsl from './grass-blades.wgsl';
+import { createGrassTile, renderGrassTile, TILE_HEIGHT, type GrassTile } from './grass-tile';
 import postWgsl from './post.wgsl';
 import sceneWgsl from './scene.wgsl';
 
@@ -29,11 +30,16 @@ export interface DreamcoreFrameOptions {
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;
   /**
+   * Geometric blades near the camera, as an instance count (0 or omitted keeps the relief
+   * only). Stills use several hundred thousand; the relief steps aside inside their zone.
+   */
+  blades?: number;
+  /**
    * Debug views of the sand world behind the door: 1 = free camera at a door-local position,
    * 2 = top-down map, 3 = the main camera inside the sand world (door and opening marked),
-   * 4 = the same without overlays.
+   * 4 = the same without overlays, 5 = the geometric blade G-buffer (distance as grey).
    */
-  debug?: { mode: 1 | 2 | 3 | 4; camera?: readonly [number, number, number] };
+  debug?: { mode: 1 | 2 | 3 | 4 | 5; camera?: readonly [number, number, number] };
   /** Camera and door overrides on top of LOOK, for exploring alternative framings. */
   look?: DreamcoreLookOverrides;
 }
@@ -60,6 +66,7 @@ interface BloomLevel {
 interface Effects {
   scene: Effect;
   grassTile: GrassTile;
+  blades: Draw;
   brightPass: Effect;
   bloom: BloomLevel[];
   post: Effect;
@@ -74,6 +81,7 @@ interface BloomTargets {
 
 interface Targets {
   scene: Target;
+  gbuffer: Target;   // geometric blades: distance + tangent, albedo + position along the blade
   bloom: BloomTargets[];
 }
 
@@ -89,6 +97,14 @@ const BLOOM_WEIGHTS = [0.45, 0.3, 0.25, 0.2, 0.2];   // per level, summing to ab
 
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
+const CLEAR_ZERO: readonly [number, number, number, number] = [0, 0, 0, 0];
+
+/**
+ * Geometric blades fill the camera's view wedge: full density from `inner` to `knee` metres,
+ * then thinning as 1/r^2 out to `outer`, with `nearFraction` of the instances inside the knee.
+ */
+const BLADE_ZONE = { inner: 2.5, knee: 10, outer: 40, nearFraction: 0.25 } as const;
+const BLADE_VERTICES = 36;   // six quads between seven spine samples
 
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
@@ -152,7 +168,10 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
 
   const handle = gpu.frame.loop((frame) => {
     // Only the two animated values are written each frame; everything else stays as set.
-    setFrame(effects, { phase: phaseAt(gpu.time), time: gpu.time, samples: 1, grassShadows: false, wind: 1 });
+    const live: DreamcoreFrameOptions = { phase: phaseAt(gpu.time), time: gpu.time, samples: 1, grassShadows: false, wind: 1 };
+    setFrame(effects, live, surface.size);
+    setSample(effects, live, [0.5, 0.5], 1, surface.size);
+    renderSample(frame, effects, targets, 0, true);
     renderChain(frame, effects, targets, surface);
   });
 
@@ -174,7 +193,7 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThumbOptions =
   await prewarm(effects, targets, target);
   gpu.frame((frame) => renderGrassTile(frame, effects.grassTile));
   const time = opts.time ?? 4.6;
-  renderFrame(gpu, effects, targets, target, { phase: phaseAt(time), time, samples: 4 });
+  renderFrame(gpu, effects, targets, target, { phase: phaseAt(time), time, samples: 4, blades: 250000 });
   await gpu.gpu.queue.onSubmittedWorkDone();
   await gpu.settled();
 }
@@ -194,8 +213,10 @@ export async function renderStill(gpu: Gpu, target: Target, frameOpts: Dreamcore
 
 function createEffects(gpu: Gpu, label: string): Effects {
   return {
-    scene: gpu.effect(sceneWgsl, { label: `${label}-scene` }),
+    // The scene adds its sub-pixel samples into the HDR target, one pass each.
+    scene: gpu.effect(sceneWgsl, { label: `${label}-scene`, blend: 'additive' }),
     grassTile: createGrassTile(gpu, 2048, `${label}-grass-tile`),
+    blades: gpu.draw({ shader: grassBladesWgsl, label: `${label}-blades`, vertices: BLADE_VERTICES }),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Every pass owns its effect, and so its uniform buffer; sharing one would make each
     // pass observe the last values written in the frame.
@@ -222,7 +243,11 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
     });
     level = halfSize(level);
   }
-  return { scene: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene` }), bloom };
+  return {
+    scene: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene` }),
+    gbuffer: gpu.target({ size: full, colors: [{ format: 'rgba32float' }, { format: 'rgba16float' }], depth: true, label: `${label}-blades` }),
+    bloom,
+  };
 }
 
 function setConstants(effects: Effects): void {
@@ -239,6 +264,16 @@ function setConstants(effects: Effects): void {
       plain: [LOOK.plain.tiltFrom, LOOK.plain.tilt, 0, LOOK.plain.far],
       dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.skew],
       sand: [LOOK.sand.rippleAmp, LOOK.sand.rippleLen, LOOK.sand.rippleFade, LOOK.sand.rippleCrest],
+      blades: [0.5, 0.5, 0, 1],
+    },
+  });
+  effects.blades.set({
+    blades: {
+      camera: [camera.height, camera.pitch, camera.fovY, 1],
+      jitter: [0, 0, 0, 0],
+      door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
+      zone: [BLADE_ZONE.inner, BLADE_ZONE.knee, BLADE_ZONE.outer, BLADE_ZONE.nearFraction],
+      count: [0, 0, 0, 0],
     },
   });
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
@@ -261,6 +296,8 @@ function setBindings(effects: Effects, targets: Targets): void {
     tileColor: tile.colors[0],
     tileTangent: tile.colors[1]!,
     tileSamp: effects.sampler,
+    bladeDist: targets.gbuffer.colors[0],
+    bladeColor: targets.gbuffer.colors[1]!,
   });
   effects.brightPass.set({ src: targets.scene });
   effects.bloom.forEach((level, i) => {
@@ -277,10 +314,11 @@ function setBindings(effects: Effects, targets: Targets): void {
   void last;
 }
 
-function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
+function setFrame(effects: Effects, frame: DreamcoreFrameOptions, size: readonly [number, number]): void {
   const phase = Math.min(1, Math.max(0, frame.phase));
   const { post, grass } = LOOK;
   const camera = { ...LOOK.camera, ...frame.look?.camera };
+  const bladeCount = bladeCountOf(frame);
   const door = { ...LOOK.door, ...frame.look?.door };
   const plain = { ...LOOK.plain, ...frame.look?.plain };
   const dune = { ...LOOK.dune, ...frame.look?.dune };
@@ -296,6 +334,15 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
       plain: [plain.tiltFrom, plain.tilt, 0, plain.far],
       dune: [dune.start, dune.slope, dune.crest, dune.skew],
       sand: [sand.rippleAmp, sand.rippleLen, sand.rippleFade, sand.rippleCrest],
+      blades: [0.5, 0.5, bladeCount > 0 ? BLADE_ZONE.outer : 0, 1],
+    },
+  });
+  effects.blades.set({
+    blades: {
+      camera: [camera.height, camera.pitch, camera.fovY, size[0] / Math.max(1, size[1])],
+      jitter: [0, 0, frame.wind ?? 0, frame.time ?? 0],
+      door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
+      count: [bladeCount, 0, 0, 0],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
@@ -309,6 +356,7 @@ async function prewarm(effects: Effects, targets: Targets, output: Output): Prom
   const level0 = targets.bloom[0]!;
   await Promise.all([
     effects.scene.compile(targets.scene), effects.brightPass.compile(level0.glow), effects.grassTile.draw.compile(effects.grassTile.target),
+    effects.blades.compile(targets.gbuffer),
     ...effects.bloom.flatMap((level, i) => {
       const mine = targets.bloom[i]!;
       return [level.down?.compile(mine.glow), level.blurH.compile(mine.temp), level.blurV.compile(mine.glow), level.up?.compile(mine.acc)];
@@ -317,8 +365,28 @@ async function prewarm(effects: Effects, targets: Targets, output: Output): Prom
   ]);
 }
 
+/** One sub-pixel sample: the geometric blades into the G-buffer, then the scene added into the HDR target. */
+function renderSample(frame: Frame, effects: Effects, targets: Targets, bladeCount: number, first: boolean): void {
+  if (bladeCount > 0) {
+    frame.pass({ target: targets.gbuffer, clear: CLEAR_ZERO }, (pass) => pass.draw(effects.blades, { instances: bladeCount, vertices: BLADE_VERTICES }));
+  }
+  frame.pass({ target: targets.scene, clear: first ? CLEAR_ZERO : false }, (pass) => pass.draw(effects.scene));
+}
+
+/** Which sub-pixel sample this pass renders and how much of the final pixel it is. */
+function setSample(effects: Effects, frame: DreamcoreFrameOptions, offset: readonly [number, number], weight: number, size: readonly [number, number]): void {
+  const zone = bladeCountOf(frame) > 0 ? BLADE_ZONE.outer : 0;
+  effects.scene.set({ params: { blades: [offset[0], offset[1], zone, weight] } });
+  // The rasteriser samples pixel centres; shift its projection so they land on this sample.
+  effects.blades.set({ blades: { jitter: [((offset[0] - 0.5) * 2) / size[0], ((offset[1] - 0.5) * 2) / size[1], frame.wind ?? 0, frame.time ?? 0] } });
+}
+
+function bladeCountOf(frame: DreamcoreFrameOptions): number {
+  return frame.debug && frame.debug.mode !== 5 ? 0 : Math.max(0, Math.floor(frame.blades ?? 0));
+}
+
+/** The bloom chain and the photographic finish, from the accumulated HDR scene. */
 function renderChain(frame: Frame, effects: Effects, targets: Targets, output: Output): void {
-  frame.pass({ target: targets.scene, clear: CLEAR }, (pass) => pass.draw(effects.scene));
   // Down the chain: bright pass into level 0, then downsample and blur each level.
   frame.pass({ target: targets.bloom[0]!.glow, clear: CLEAR }, (pass) => pass.draw(effects.brightPass));
   effects.bloom.forEach((level, i) => {
@@ -336,14 +404,28 @@ function renderChain(frame: Frame, effects: Effects, targets: Targets, output: O
   frame.pass({ target: output, clear: CLEAR }, (pass) => pass.draw(effects.post));
 }
 
+/**
+ * A still: an n x n grid of sub-pixel samples, each its own frame (the blades rasterised
+ * and the scene ray marched at that offset, added into the HDR target), then the finish.
+ */
 function renderFrame(gpu: Gpu, effects: Effects, targets: Targets, output: Target, frameOpts: DreamcoreFrameOptions): void {
-  setFrame(effects, frameOpts);
+  const size = targets.scene.size;
+  setFrame(effects, frameOpts, size);
+  const bladeCount = bladeCountOf(frameOpts);
+  const n = Math.max(1, Math.round(Math.sqrt(frameOpts.samples ?? 1)));
+  const total = n * n;
+  for (let i = 0; i < total; i++) {
+    const offset: [number, number] = [((i % n) + 0.5) / n, (Math.floor(i / n) + 0.5) / n];
+    setSample(effects, frameOpts, offset, 1 / total, size);
+    gpu.frame((frame) => renderSample(frame, effects, targets, bladeCount, i === 0));
+  }
   gpu.frame((frame) => renderChain(frame, effects, targets, output));
 }
 
 function resizeTargets(targets: Targets, size: readonly [number, number]): void {
   const full = normalizeSize(size);
   targets.scene.resize(full);
+  targets.gbuffer.resize(full);
   let level = halfSize(full);
   for (const mip of targets.bloom) {
     mip.glow.resize(level);
