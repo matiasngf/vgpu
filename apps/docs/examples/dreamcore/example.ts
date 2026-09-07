@@ -26,8 +26,12 @@ export interface DreamcoreFrameOptions {
   grassShadows?: boolean;
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;
-  /** Debug views of the sand world behind the door: 1 = free camera at a door-local position, 2 = top-down map. */
-  debug?: { mode: 1 | 2; camera?: readonly [number, number, number] };
+  /**
+   * Debug views of the sand world behind the door: 1 = free camera at a door-local position,
+   * 2 = top-down map, 3 = the main camera inside the sand world (door and opening marked),
+   * 4 = the same without overlays.
+   */
+  debug?: { mode: 1 | 2 | 3 | 4; camera?: readonly [number, number, number] };
   /** Camera and door overrides on top of LOOK, for exploring alternative framings. */
   look?: DreamcoreLookOverrides;
 }

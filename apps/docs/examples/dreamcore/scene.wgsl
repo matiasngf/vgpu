@@ -19,7 +19,7 @@ struct Params {
   door: vec4f,       // x, z, yaw (rad), leaf angle (rad)
   look: vec4f,       // sun azimuth (rad), sun elevation (rad), texture strength, door light
   grass: vec4f,      // blade radius (m), blade height (m), blade shadow rays (0/1), wind
-  debug: vec4f,      // debug view (0 off, 1 sand world free camera, 2 top-down map), camera xyz
+  debug: vec4f,      // debug view (0 off, 1 free camera, 2 top-down map, 3 main camera, 4 main camera clean), camera xyz
   dune: vec4f,       // first dune: start (m behind the sill), stoss slope (tan), crest (m), far field level (m)
   dune2: vec4f,      // second dune: gap after the first crest (m), stoss slope (tan), crest (m), crest line skew (tan)
 }
@@ -977,10 +977,12 @@ fn debugGrid(xz: vec2f, footprint: f32) -> f32 {
 
 // Free camera in the sand world: the door as solid geometry on the flat toe, the slip face
 // behind it, a 1 m grid, the door plane in blue and the part seen through the opening in green.
-fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
+// overlays: 0 bare sand, 1 the door and the part seen through it, 2 also the grid and door plane.
+fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec3f {
   let f = identityFrame();
   let tDune = marchDune(ro, rd);
-  let tDoor = marchDoor(ro, rd, select(tDune, 200.0, tDune < 0.0), f);
+  var tDoor = -1.0;
+  if (overlays > 0) { tDoor = marchDoor(ro, rd, select(tDune, 200.0, tDune < 0.0), f); }
   if (tDoor > 0.0) {
     let p = ro + rd * tDoor;
     let n = doorNormal(p, f);
@@ -990,9 +992,13 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
   let p = ro + rd * tDune;
   let footprint = pixelAngle * tDune;
   var col = shadeSand(p, rd, footprint);
-  col = mix(col, vec3f(0.05, 0.05, 0.08), debugGrid(p.xz, footprint) * 0.6);
-  col = mix(col, vec3f(0.1, 0.3, 1.0), smoothstep(max(footprint * 2.0, 0.006), 0.0, abs(p.z)) * 0.9);
-  col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
+  if (overlays > 1) {
+    col = mix(col, vec3f(0.05, 0.05, 0.08), debugGrid(p.xz, footprint) * 0.6);
+    col = mix(col, vec3f(0.1, 0.3, 1.0), smoothstep(max(footprint * 2.0, 0.006), 0.0, abs(p.z)) * 0.9);
+  }
+  if (overlays > 0) {
+    col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
+  }
   return mix(col, SAND_HORIZON, 1.0 - exp(-tDune * 0.013));
 }
 
@@ -1019,7 +1025,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
 
 @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let res = params.resolution;
-  if (params.debug.x > 1.5) {
+  if (params.debug.x > 1.5 && params.debug.x < 2.5) {
     return vec4f(renderDebugMap(uv), 1.0);
   }
   let aspect = res.x / max(res.y, 1.0);
@@ -1047,6 +1053,18 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
     let ndc = (px / res) * 2.0 - 1.0;
     let sx = ndc.x * aspect;
     let sy = -ndc.y;
+    if (params.debug.x > 2.5) {
+      // The main camera carried into the sand world: same place, pitch and lens, so the
+      // composition of the sand behind the door can be read as the door frames it.
+      let fD = doorFrame();
+      let camD = toDoor(ro, fD);
+      let fwdW = vec3f(dot(forward, fD.right), forward.y, dot(forward, fD.fwd));
+      let upW = vec3f(dot(up, fD.right), up.y, dot(up, fD.fwd));
+      let rightW = vec3f(dot(right, fD.right), right.y, dot(right, fD.fwd));
+      let rdM = normalize(fwdW * focal + rightW * sx + upW * sy);
+      acc += renderDebugWorld(camD, rdM, pixelAngle, select(1, 0, params.debug.x > 3.5));
+      continue;
+    }
     if (params.debug.x > 0.5) {
       // Free camera in the sand world, looking at the foot of the slip face.
       let cam = params.debug.yzw;
@@ -1055,7 +1073,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
       let upD = cross(fwdD, rightD);
       let focalD = 1.0 / tan(0.45);
       let rdD = normalize(fwdD * focalD + rightD * sx + upD * sy);
-      acc += renderDebugWorld(cam, rdD, (2.0 / focalD) / res.y);
+      acc += renderDebugWorld(cam, rdD, (2.0 / focalD) / res.y, 2);
       continue;
     }
     let rd = normalize(forward * focal + right * sx + up * sy);

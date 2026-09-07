@@ -22,6 +22,7 @@ const width = Number(args.width ?? 1080);
 const height = Number(args.height ?? 1920);
 const cycleFrames = args.cycle ? Number(args.cycle) : 0;
 const cacheDir = path.join(docsDir, '.dreamcore-cache');
+const DEBUG_MODES = { world: 1, map: 2, main: 3, 'main-clean': 4 };
 // --look '{"camera":{"height":1.7},"door":{"z":9}}' overrides the framing; --name prefixes the files.
 const look = args.look ? JSON.parse(args.look) : undefined;
 const prefix = args.name ? `${args.name}.` : '';
@@ -103,13 +104,13 @@ async function loadExample() {
   return import(pathToFileURL(bundle).href);
 }
 
-// --debug world | map | all [--debug-cam x,y,z]: views of the sand world behind the door.
+// --debug world | map | main | main-clean | all [--debug-cam x,y,z]: views of the sand world.
 function debugSteps(spec, cam) {
-  const modes = spec === 'all' ? ['world', 'map'] : [spec];
+  const modes = spec === 'all' ? Object.keys(DEBUG_MODES) : [spec];
   const camera = cam ? cam.split(',').map(Number) : undefined;
   return modes.map((name) => {
-    if (name !== 'world' && name !== 'map') throw new Error(`Unknown debug view '${name}' (world, map or all).`);
-    return { phase: 0, time: 0, name: `debug-${name}`, debug: { mode: name === 'map' ? 2 : 1, camera } };
+    if (!(name in DEBUG_MODES)) throw new Error(`Unknown debug view '${name}' (${Object.keys(DEBUG_MODES).join(', ')} or all).`);
+    return { phase: 0, time: 0, name: `debug-${name}`, debug: { mode: DEBUG_MODES[name], camera } };
   });
 }
 
