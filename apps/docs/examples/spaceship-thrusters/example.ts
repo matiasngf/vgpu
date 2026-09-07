@@ -199,6 +199,8 @@ const QUALITY: Record<ThrusterQuality, {
   /** Plume history resolution relative to the frame; the composite upsamples it depth-aware. */
   fireScale: number;
   bloomHeight: number;
+  /** Halation: strength in the composite, bright-pass threshold, and blur radius multiplier. */
+  bloom: { strength: number; threshold: number; radius: number };
   /** Screen-space ambient occlusion on the geometry (world-space radius in nozzle radii). */
   ao: { radius: number; intensity: number; bias: number } | null;
   /** Final lens pass; null renders the composite straight to the output. */
@@ -206,11 +208,12 @@ const QUALITY: Record<ThrusterQuality, {
   /** Composite-side vignette and grain (the social variant moves both to the post pass). */
   composite: { vignette: number; grain: number };
 }> = {
-  fast: { plume: PLUME_MODE, fireScale: 0.5, bloomHeight: 240, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
+  fast: { plume: PLUME_MODE, fireScale: 0.5, bloomHeight: 240, bloom: { strength: 0.8, threshold: 1.0, radius: 1.0 }, ao: null, post: null, composite: { vignette: 0.28, grain: 0.02 } },
   social: {
     plume: 'direct',
     fireScale: 1.0,
     bloomHeight: 480,
+    bloom: { strength: 1.85, threshold: 0.65, radius: 2.0 },
     ao: { radius: 2.0, intensity: 4.5, bias: 0.08 },
     post: { grain: 0.085, vignette: 0.45, edgeBlur: 0.009, edgeStart: 0.5 },
     composite: { vignette: 0, grain: 0 },
@@ -562,13 +565,14 @@ function setConstants(effects: Effects, targets: Targets): void {
   if (effects.plumeMode === 'grid') effects.fire.set({ plumeGrid: targets.plumeGrid, gridSamp: effects.clampSampler });
   else effects.fire.set({ atlas: targets.noiseAtlas, atlasSamp: effects.clampSampler });
   effects.resolve.set({ resolve: { phase: 0, blend: TEMPORAL_BLEND, neighbor: TEMPORAL_NEIGHBOR } });
-  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: 1.0, knee: 0.6 } });
-  effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 } });
-  effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 } });
-  effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 } });
-  effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 } });
   const variant = QUALITY[effects.quality];
-  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: 0.8, time: 0, skyColor: [0.004, 0.005, 0.01], ...variant.composite } });
+  const bloom = variant.bloom;
+  effects.brightPass.set({ samp: effects.clampSampler, bright: { threshold: bloom.threshold, knee: 0.6 } });
+  effects.blurH1.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 1 * bloom.radius } });
+  effects.blurV1.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 1 * bloom.radius } });
+  effects.blurH2.set({ samp: effects.clampSampler, blur: { direction: [1, 0], radius: 2.6 * bloom.radius } });
+  effects.blurV2.set({ samp: effects.clampSampler, blur: { direction: [0, 1], radius: 2.6 * bloom.radius } });
+  effects.composite.set({ samp: effects.clampSampler, composite: { exposure: 1.35, bloomStrength: bloom.strength, time: 0, skyColor: [0.004, 0.005, 0.01], ...variant.composite } });
   if (variant.ao) {
     effects.ao!.set({ ao: variant.ao });
     effects.aoBlur!.set({ blur: { direction: [1, 0] } });
