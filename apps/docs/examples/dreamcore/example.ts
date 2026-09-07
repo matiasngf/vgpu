@@ -37,6 +37,8 @@ export interface DreamcoreLookOverrides {
   door?: Partial<{ x: number; z: number; yaw: number; leaf: number }>;
   /** First dune of the sand world: start behind the sill (m), stoss slope (tan), crest (m), far field level (m). */
   dune?: Partial<{ start: number; slope: number; crest: number; far: number }>;
+  /** Second, taller dune: gap after the first crest (m), stoss slope (tan), crest (m), crest line skew (tan). */
+  dune2?: Partial<{ gap: number; slope: number; crest: number; skew: number }>;
 }
 
 interface Effects {
@@ -70,8 +72,9 @@ export const LOOK = {
   doorLight: 12,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
   grass: { radius: 60, height: 0.32 },
-  /** Flat sand for 4.5 m, then a 19 degree dune with a 2.8 m crest and a low dune field behind. */
-  dune: { start: 4.5, slope: 0.34, crest: 2.8, far: 1.0 },
+  /** Flat sand for 3 m, a low first dune the eye looks over, and a tall second dune behind it. */
+  dune: { start: 3.0, slope: 0.30, crest: 1.9, far: 1.0 },
+  dune2: { gap: 3.0, slope: 0.5, crest: 4.5, skew: -0.5 },
   post: { exposure: 1.15, bloomStrength: 0.95, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
@@ -198,6 +201,7 @@ function setConstants(effects: Effects): void {
       grass: [grass.radius, grass.height, 1, 0],
       debug: [0, 0, 0, 0],
       dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.far],
+      dune2: [LOOK.dune2.gap, LOOK.dune2.slope, LOOK.dune2.crest, LOOK.dune2.skew],
     },
   });
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
@@ -233,6 +237,7 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
   const camera = { ...LOOK.camera, ...frame.look?.camera };
   const door = { ...LOOK.door, ...frame.look?.door };
   const dune = { ...LOOK.dune, ...frame.look?.dune };
+  const dune2 = { ...LOOK.dune2, ...frame.look?.dune2 };
   effects.scene.set({
     params: {
       time: frame.time ?? 0,
@@ -242,6 +247,7 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
       grass: [grass.radius, grass.height, frame.grassShadows === false ? 0 : 1, frame.wind ?? 0],
       debug: frame.debug ? [frame.debug.mode, ...(frame.debug.camera ?? DEBUG_CAMERA)] : [0, 0, 0, 0],
       dune: [dune.start, dune.slope, dune.crest, dune.far],
+      dune2: [dune2.gap, dune2.slope, dune2.crest, dune2.skew],
     },
   });
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
