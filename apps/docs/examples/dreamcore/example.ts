@@ -2,6 +2,7 @@ import type { Effect, Frame, Gpu, Surface, Target } from 'vgpu';
 
 import blurWgsl from './blur.wgsl';
 import brightPassWgsl from './bright-pass.wgsl';
+import { createGrassTile, renderGrassTile, type GrassTile } from './grass-tile';
 import postWgsl from './post.wgsl';
 import sceneWgsl from './scene.wgsl';
 
@@ -21,7 +22,7 @@ export interface DreamcoreFrameOptions {
   time?: number;
   /** 1 sample per pixel for live rendering, 4 for stills. */
   samples?: 1 | 4;
-  /** Full-quality fur march (56 steps); off halves the steps for a cheaper live frame. */
+  /** Full-quality grass march (56 steps); off halves the steps for a cheaper live frame. */
   grassShadows?: boolean;
   /** Wind amplitude for the blades (0 for stills). */
   wind?: number;
@@ -29,6 +30,7 @@ export interface DreamcoreFrameOptions {
 
 interface Effects {
   scene: Effect;
+  grassTile: GrassTile;
   brightPass: Effect;
   blurH1: Effect;
   blurV1: Effect;
@@ -55,8 +57,8 @@ export const LOOK = {
   sun: { azimuth: -1.15, elevation: 0.72 },
   texture: 1,
   doorLight: 12,
-  /** Fur-grass patch around the door (radius in metres) and pile height. */
-  grass: { radius: 9, height: 0.1 },
+  /** Blade patch around the door (radius in metres) and tallest blade height. */
+  grass: { radius: 60, height: 0.32 },
   post: { exposure: 1, bloomStrength: 0.6, grain: 0.035, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
@@ -87,6 +89,7 @@ export async function run(canvas: HTMLCanvasElement): Promise<() => void> {
   setConstants(effects);
   setBindings(effects, targets);
   await prewarm(effects, targets, surface);
+  gpu.frame((frame) => renderGrassTile(frame, effects.grassTile));
 
   let sawInitialResize = false;
   const unsubscribeResize = surface.onResize(() => {
@@ -121,6 +124,7 @@ export async function renderThumb(gpu: Gpu, target: Target, opts: ThumbOptions =
   setConstants(effects);
   setBindings(effects, targets);
   await prewarm(effects, targets, target);
+  gpu.frame((frame) => renderGrassTile(frame, effects.grassTile));
   const time = opts.time ?? 4.6;
   renderFrame(gpu, effects, targets, target, { phase: phaseAt(time), time, samples: 4 });
   await gpu.gpu.queue.onSubmittedWorkDone();
@@ -134,6 +138,7 @@ export async function renderStill(gpu: Gpu, target: Target, frameOpts: Dreamcore
   setConstants(effects);
   setBindings(effects, targets);
   await prewarm(effects, targets, target);
+  gpu.frame((frame) => renderGrassTile(frame, effects.grassTile));
   renderFrame(gpu, effects, targets, target, frameOpts);
   await gpu.gpu.queue.onSubmittedWorkDone();
   await gpu.settled();
@@ -142,6 +147,7 @@ export async function renderStill(gpu: Gpu, target: Target, frameOpts: Dreamcore
 function createEffects(gpu: Gpu, label: string): Effects {
   return {
     scene: gpu.effect(sceneWgsl, { label: `${label}-scene` }),
+    grassTile: createGrassTile(gpu, 2048, `${label}-grass-tile`),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Each blur pass owns its uniform buffer; sharing one effect would make every pass
     // observe the last direction written in the frame.
@@ -150,7 +156,7 @@ function createEffects(gpu: Gpu, label: string): Effects {
     blurH2: gpu.effect(blurWgsl, { label: `${label}-blur-h2` }),
     blurV2: gpu.effect(blurWgsl, { label: `${label}-blur-v2` }),
     post: gpu.effect(postWgsl, { label: `${label}-post` }),
-    sampler: gpu.sampler({ minFilter: 'linear', magFilter: 'linear' }),
+    sampler: gpu.sampler({ minFilter: 'linear', magFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
   };
 }
 
@@ -188,7 +194,13 @@ function setConstants(effects: Effects): void {
 }
 
 function setBindings(effects: Effects, targets: Targets): void {
-  effects.scene.set({ params: { resolution: targets.scene.size } });
+  const tile = effects.grassTile.target;
+  effects.scene.set({
+    params: { resolution: targets.scene.size },
+    tileColor: tile.colors[0],
+    tileTangent: tile.colors[1]!,
+    tileSamp: effects.sampler,
+  });
   effects.brightPass.set({ src: targets.scene });
   effects.blurH1.set({ src: targets.bloomA, blur: { texelSize: targets.bloomA.texelSize } });
   effects.blurV1.set({ src: targets.bloomB, blur: { texelSize: targets.bloomB.texelSize } });
@@ -215,7 +227,7 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions): void {
 
 async function prewarm(effects: Effects, targets: Targets, output: Output): Promise<void> {
   await Promise.all([
-    effects.scene.compile(targets.scene), effects.brightPass.compile(targets.bloomA),
+    effects.scene.compile(targets.scene), effects.brightPass.compile(targets.bloomA), effects.grassTile.draw.compile(effects.grassTile.target),
     effects.blurH1.compile(targets.bloomB), effects.blurV1.compile(targets.bloomA),
     effects.blurH2.compile(targets.bloomB), effects.blurV2.compile(targets.bloomA),
     effects.post.compile({ colors: [output.format] }),

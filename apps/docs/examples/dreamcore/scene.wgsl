@@ -2,13 +2,13 @@
 // opening there is a sunlit sand dune; as `phase` rises the day pours out of the door and
 // sweeps across the hills.
 //
-// Fullscreen raymarcher: heightfield hills, a fur-style grass volume (a combed strand
-// density field ray marched with front-to-back compositing, Kajiya-Kay fibre shading, depth
-// occlusion and light transmittance), an SDF door, a rectangular area light for the door
-// spill, single scattering in the night air, and a second heightfield world (the dune)
-// behind the portal.
+// Fullscreen raymarcher: heightfield hills, a relief-mapped blade layer (a tile of thousands
+// of bent blades rasterised top-down, then ray marched as a heightfield with Kajiya-Kay fibre
+// shading, depth occlusion and light transmittance), an SDF door, a rectangular area light for
+// the door spill, single scattering in the night air, and a second heightfield world (the
+// dune) behind the portal.
 //
-// Grass techniques follow Kajiya & Kay (fur as a lit 3D texture, anisotropic fibre shading)
+// Grass techniques follow Habel et al. (ray-cast grass layers), Kajiya & Kay (fibre shading)
 // and Boulanger et al. (lit grass volume with occlusion and shadows through the layer).
 
 struct Params {
@@ -22,6 +22,9 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var tileColor: texture_2d<f32>;    // rgb sRGB albedo, a height / TILE_HEIGHT
+@group(0) @binding(2) var tileTangent: texture_2d<f32>;  // xyz blade tangent * 0.5 + 0.5 (tile space), w along-blade
+@group(0) @binding(3) var tileSamp: sampler;
 
 const PI: f32 = 3.14159265359;
 const DOOR_W: f32 = 0.92;   // opening width
@@ -281,176 +284,93 @@ fn doorShadow(p: vec3f, l: vec3f, f: DoorFrame, maxT: f32, k: f32) -> f32 {
   return s;
 }
 
-// ---------------------------------------------------------------- grass fur volume
+// ---------------------------------------------------------------- grass layer
 
-// The grass is a fur-like volume (Kajiya-Kay style 3D texture): a dense field of thin strands
-// described by a density function inside a slab above the ground, ray marched with
-// front-to-back compositing. Combing shifts the strand pattern with height so strands lie
-// along the comb direction instead of standing up.
-const FUR_COMB: f32 = 1.7;      // horizontal strand drift per metre of height (lying down)
-const FUR_SIGMA: f32 = 150.0;   // extinction inside a strand-dense region (1/m)
+// The grass is a relief-mapped layer: a repeating tile of thousands of bent blades rendered
+// top-down (colour + height + tangent) is ray marched as a heightfield above the ground, so
+// blades overlap, occlude and bend sideways like a real lawn. The tile is combed along +x and
+// the world comb field rotates it locally.
+const TILE_SIZE: f32 = 3.0;
+const TILE_HEIGHT: f32 = 0.32;
 
-// Local fur coverage: clumpy, fading toward the edge of the fur patch around the door.
+// Local grass coverage: clumpy, only on the flat plain (the hills keep the far-field
+// texture), fading with distance from the camera where blades would be sub-pixel anyway.
 fn grassCoverage(xz: vec2f) -> f32 {
-  let clump = clamp(0.45 + 1.1 * (fbm3(xz * 0.45 + vec2f(9.0, 4.0)) - 0.3), 0.3, 1.25);
+  let clump = clamp(0.55 + 0.9 * (fbm3(xz * 0.45 + vec2f(9.0, 4.0)) - 0.3), 0.35, 1.2);
   let radius = params.grass.x;
-  return clump * (1.0 - smoothstep(radius * 0.55, radius * 0.98, length(xz - params.door.xy)));
+  let inPatch = 1.0 - smoothstep(radius * 0.7, radius * 0.98, length(xz - params.door.xy));
+  let near = 1.0 - smoothstep(26.0, 42.0, length(xz));
+  return clump * inPatch * near;
 }
 
 // Comb direction of the flattened grass: a prevailing direction with gentle waves.
 fn combDir(xz: vec2f) -> vec2f {
-  let a = PI * 0.78 + 0.7 * (fbm3(xz * 0.07 + vec2f(3.0, 1.0)) - 0.5) + 0.2 * sin(xz.x * 0.9 + xz.y * 0.4);
+  let a = PI * 0.78 + 0.4 * (fbm3(xz * 0.07 + vec2f(3.0, 1.0)) - 0.5) + 0.08 * sin(xz.x * 0.9 + xz.y * 0.4);
   return vec2f(sin(a), cos(a));
 }
 
-struct FurSample {
-  density: f32,
-  strand: f32,   // strand pattern value, for per-strand colour variation
+struct GrassFrame {
+  dir: vec2f,      // world direction the tile's +x maps to
+  cover: f32,
+  scale: f32,      // tile height to scene height
 }
 
-fn furDensity(p: vec3f, dir: vec2f, cover: f32, fineMix: f32) -> FurSample {
-  var s: FurSample;
-  let h = max(params.grass.y, 0.01);
-  let hf = clamp(p.y / h, 0.0, 1.0);
-  // Combing: the pattern drifts along the comb direction as we go up, so a strand column
-  // becomes a strand lying along `dir`.
-  let q = p.xz - dir * (p.y * FUR_COMB);
-  // Strand pattern stretched along the comb direction: brushed streaks, not speckle. The fine
-  // octave fades out where a pixel is wider than a strand, which keeps far rows from aliasing.
-  let perp = vec2f(-dir.y, dir.x);
-  let u = vec2f(dot(q, dir) * 0.45, dot(q, perp));
-  let coarse = vnoise(u * 90.0);
-  let fine = vnoise(u * 190.0 + vec2f(7.3, 2.1));
-  let strand = mix(coarse, coarse * 0.65 + fine * 0.35, fineMix);
-  let lenVar = 0.55 + 0.45 * vnoise(q * 14.0 + vec2f(3.0, 5.0));
-  let d = strand * lenVar * cover - hf * 0.85;
-  s.density = clamp(d * 3.5, 0.0, 1.0);
-  s.strand = strand;
-  return s;
+fn grassFrame(xz: vec2f) -> GrassFrame {
+  var g: GrassFrame;
+  g.dir = combDir(xz);
+  g.cover = grassCoverage(xz);
+  g.scale = params.grass.y / TILE_HEIGHT;
+  return g;
 }
 
-// Light transmittance down into the fur toward a light: strands are densest near the ground.
-fn furTransmittance(hf: f32, l: vec3f, cover: f32) -> f32 {
-  let depth = pow(1.0 - hf, 1.5);
-  return exp(-1.4 * cover * depth / max(l.y, 0.12));
+fn grassUV(xz: vec2f, g: GrassFrame) -> vec2f {
+  let rel = xz - params.door.xy;
+  let local = vec2f(dot(rel, g.dir), dot(rel, vec2f(-g.dir.y, g.dir.x)));
+  return vec2f(local.x / TILE_SIZE, 1.0 - local.y / TILE_SIZE);
 }
 
-struct FurResult {
-  color: vec3f,
-  alpha: f32,
+fn grassHeight(xz: vec2f, g: GrassFrame) -> f32 {
+  return textureSampleLevel(tileColor, tileSamp, grassUV(xz, g), 0.0).a * TILE_HEIGHT * g.scale * g.cover;
 }
 
-fn furAlbedo(hf: f32, strand: f32) -> vec3f {
-  let base = rgb8(46.0, 82.0, 26.0);
-  let tip = rgb8(150.0, 176.0, 66.0);
-  var albedo = mix(base, tip, smoothstep(0.0, 1.0, hf));
-  albedo *= 0.8 + 0.4 * strand;
-  return albedo;
+// Blade layer surface height above the local terrain.
+fn grassSurface(p: vec3f, g: GrassFrame) -> f32 {
+  return p.y - terrainHeight(p.xz) - grassHeight(p.xz, g);
 }
 
-// March the fur slab between tEnter and tExit along the ray and composite front to back.
-fn furMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, f: DoorFrame, dayMix: f32, rim: f32, pixelAngle: f32) -> FurResult {
-  var res: FurResult;
-  res.color = vec3f(0.0);
-  res.alpha = 0.0;
-  if (tExit <= tEnter) { return res; }
-  let steps = select(40, 88, params.grass.z > 0.5);
+// Relief march of the blade heightfield, which rides on the terrain, between tEnter and the
+// terrain hit tExit.
+fn grassMarch(ro: vec3f, rd: vec3f, tEnter: f32, tExit: f32, g: GrassFrame) -> f32 {
+  let steps = select(28, 56, params.grass.z > 0.5);
   let dt = (tExit - tEnter) / f32(steps);
-  // Per-ray start jitter turns step banding into fine noise that supersampling averages out.
   let jitter = hash13(rd * 977.0) * dt;
-  let footprint = pixelAngle * tExit;
-  let fineMix = 1.0 - smoothstep(0.003, 0.009, footprint);
-  let h = max(params.grass.y, 0.01);
-  // Per-ray constants: the comb field and coverage vary slowly, so sample them once at the
-  // ground point; shadows from the door are evaluated once as well.
-  let pg = ro + rd * tExit;
-  let cover = grassCoverage(pg.xz);
-  if (cover < 0.01) { return res; }
-  let dir = combDir(pg.xz);
-  let tangent = normalize(vec3f(dir.x * FUR_COMB, 1.0, dir.y * FUR_COMB));
-  let sun = sunDir();
-  let sunCol = sunColor();
-  let v = -rd;
-  let sunSh = doorShadow(pg + vec3f(0.0, 0.05, 0.0), sun, f, 8.0, 5.0) * terrainShadow(pg, sun);
-  let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
-  let toDoorC = doorCenter - pg;
-  let doorSh = doorShadow(pg + vec3f(0.0, 0.04, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.3, 12.0);
-  // Kajiya-Kay terms depend only on directions, so they are per ray.
-  let tlSun = dot(tangent, sun);
-  let kkSun = sqrt(max(1.0 - tlSun * tlSun, 0.0));
-  let hSun = normalize(sun + v);
-  let thSun = dot(tangent, hSun);
-  let specSun = pow(sqrt(max(1.0 - thSun * thSun, 0.0)), 18.0) * 0.12;
-  let moon = moonDir();
-  let tlMoon = dot(tangent, moon);
-  let kkMoon = sqrt(max(1.0 - tlMoon * tlMoon, 0.0));
-
-  var T = 1.0;
-  var col = vec3f(0.0);
+  var tPrev = tEnter;
   for (var i = 0; i < steps; i++) {
     let t = tEnter + f32(i) * dt + jitter;
     if (t > tExit) { break; }
-    let p = ro + rd * t;
-    let fs = furDensity(p, dir, cover, fineMix);
-    if (fs.density < 0.002) { continue; }
-    let hf = clamp(p.y / h, 0.0, 1.0);
-    let albedo = furAlbedo(hf, fs.strand);
-    let ao = 0.25 + 0.75 * hf;
-    // Day: sun through the fur plus sky ambient, occluded with depth.
-    var day = albedo * (sunCol * kkSun * furTransmittance(hf, sun, cover) * sunSh + AMBIENT * ao);
-    day += sunCol * specSun * furTransmittance(hf, sun, cover) * sunSh * albedo * 2.0;
-    // Night: moon fill and the door light.
-    let lumA = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
-    let nightAlbedo = mix(albedo, lumA * vec3f(0.65, 0.85, 1.0), 0.4);
-    var night = nightAlbedo * (vec3f(0.28, 0.4, 0.68) * 0.16 * kkMoon * furTransmittance(hf, moon, cover) + vec3f(0.006, 0.01, 0.026) * ao);
-    if (dayMix < 0.999) {
-      var e = 0.0;
-      var spec = 0.0;
-      for (var j = 0; j < 3; j++) {
-        let o = DOOR_SAMPLES[j];
-        let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
-        let toL = s - p;
-        let d = max(length(toL), 0.05);
-        let l = toL / d;
-        let facing = max(dot(f.fwd, l), 0.0);
-        let geom = facing / (d * d + 0.6);
-        let tl = dot(tangent, l);
-        let kk = sqrt(max(1.0 - tl * tl, 0.0));
-        let tr = furTransmittance(hf, l, cover);
-        e += geom * (0.35 + 0.65 * kk) * tr;
-        let hl = normalize(l + v);
-        let th = dot(tangent, hl);
-        spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 14.0) * tr;
+    if (grassSurface(ro + rd * t, g) < 0.0) {
+      // Bisect between the last sample above the surface and this one.
+      var a = tPrev;
+      var b = t;
+      for (var k = 0; k < 4; k++) {
+        let m = 0.5 * (a + b);
+        if (grassSurface(ro + rd * m, g) < 0.0) { b = m; } else { a = m; }
       }
-      let front = dot(p - f.origin, f.fwd);
-      let inFront = select(0.0, 1.0, front < -0.01);
-      night += albedo * DOOR_COLOR * params.look.w * (e * 0.333 + spec * 0.08) * doorSh * inFront;
+      return 0.5 * (a + b);
     }
-    var sampleCol = mix(night, day, dayMix) + albedo * rimGlow(vec3f(0.0, 1.0, 0.0), rim);
-    let a = 1.0 - exp(-fs.density * FUR_SIGMA * dt);
-    col += T * a * sampleCol;
-    T *= 1.0 - a;
-    if (T < 0.02) { break; }
+    tPrev = t;
   }
-  res.color = col;
-  res.alpha = 1.0 - T;
-  return res;
+  return -1.0;
 }
 
-// Ray/slab interval for the fur layer (y in [0, height]) restricted to the fur patch radius.
-fn furInterval(ro: vec3f, rd: vec3f, tMax: f32) -> vec2f {
+// Ray interval for the grass layer: from one layer height above the terrain hit (the
+// terrain is locally gentle) down to the hit, restricted to the patch radius.
+fn grassInterval(ro: vec3f, rd: vec3f, tHit: f32) -> vec2f {
+  if (tHit <= 0.0 || rd.y > -0.02) { return vec2f(1.0, 0.0); }
   let hMax = params.grass.y;
+  var t0 = max(tHit - hMax * 1.6 / (-rd.y), 0.0);
+  var t1 = tHit;
   let radius = params.grass.x;
-  var t0 = 0.0;
-  var t1 = tMax;
-  if (abs(rd.y) > 1e-6) {
-    let ta = (0.0 - ro.y) / rd.y;
-    let tb = (hMax - ro.y) / rd.y;
-    t0 = max(t0, min(ta, tb));
-    t1 = min(t1, max(ta, tb));
-  } else if (ro.y < 0.0 || ro.y > hMax) {
-    return vec2f(1.0, 0.0);
-  }
   let a2 = dot(rd.xz, rd.xz);
   if (a2 > 1e-8) {
     let oc = ro.xz - params.door.xy;
@@ -463,6 +383,12 @@ fn furInterval(ro: vec3f, rd: vec3f, tMax: f32) -> vec2f {
     t1 = min(t1, (-b2 + sq) / a2);
   }
   return vec2f(t0, t1);
+}
+
+// Light reaching a point at relative height hf inside the blade layer.
+fn grassTransmittance(hf: f32, l: vec3f, cover: f32) -> f32 {
+  let depth = pow(1.0 - hf, 1.5);
+  return exp(-1.6 * cover * depth / max(l.y, 0.12));
 }
 
 // ---------------------------------------------------------------- portal + sand world
@@ -773,7 +699,7 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
   let sunCol = sunColor();
   let ndl = max(dot(n, sun), 0.0);
   var sh = terrainShadow(p, sun) * doorShadow(p, sun, f, 8.0, 5.0);
-  sh *= furTransmittance(0.0, sun, cover);
+  sh *= grassTransmittance(0.0, sun, cover);
   let hemi = 0.5 + 0.5 * n.y;
   var day = albedo * (sunCol * ndl * sh + AMBIENT * hemi * ao);
   let h = normalize(sun + v);
@@ -782,7 +708,72 @@ fn shadeGround(p: vec3f, n0: vec3f, rd: vec3f, t: f32, footprint: f32, f: DoorFr
   // --- Night: moon fill + the door spill.
   var night = nightBase(albedo, n) * ao;
   if (dayMix < 0.999) {
-    night += mix(albedo, vec3f(dot(albedo, vec3f(0.33))), 0.2) * doorLight(p, n, vec3f(0.0), 0.0, f, true) * furTransmittance(0.0, normalize(f.origin + vec3f(0.0, 1.0, 0.0) - p), cover);
+    night += mix(albedo, vec3f(dot(albedo, vec3f(0.33))), 0.2) * doorLight(p, n, vec3f(0.0), 0.0, f, true) * grassTransmittance(0.0, normalize(f.origin + vec3f(0.0, 1.0, 0.0) - p), cover);
+  }
+  return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
+}
+
+fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
+  let uv = grassUV(p.xz, g);
+  let colH = textureSampleLevel(tileColor, tileSamp, uv, 0.0);
+  let tanS = textureSampleLevel(tileTangent, tileSamp, uv, 0.0);
+  let hf = clamp((p.y - terrainHeight(p.xz)) / max(params.grass.y, 0.01), 0.0, 1.0);
+  var albedo = srgb2lin(colH.rgb);
+  // Tile tangent lives in comb space (+x = comb direction); rotate it into the world.
+  let tt = tanS.xyz * 2.0 - vec3f(1.0);
+  let perp = vec2f(-g.dir.y, g.dir.x);
+  let tangent = normalize(vec3f(tt.x * g.dir.x + tt.z * perp.x, tt.y, tt.x * g.dir.y + tt.z * perp.y));
+  // Heightfield normal from the tile, softened: blades are thin so raw gradients are spiky.
+  let e = 0.006;
+  let hx = grassHeight(p.xz + vec2f(e, 0.0), g) - grassHeight(p.xz - vec2f(e, 0.0), g);
+  let hz = grassHeight(p.xz + vec2f(0.0, e), g) - grassHeight(p.xz - vec2f(0.0, e), g);
+  var n = normalize(vec3f(-hx * 0.35, 2.0 * e, -hz * 0.35));
+  let v = -rd;
+  let sun = sunDir();
+  let sunCol = sunColor();
+  let ao = 0.3 + 0.7 * hf;
+  let sh = doorShadow(p + vec3f(0.0, 0.02, 0.0), sun, f, 8.0, 5.0) * terrainShadow(p, sun);
+  let tlSun = dot(tangent, sun);
+  let kkSun = sqrt(max(1.0 - tlSun * tlSun, 0.0));
+  let lambertSun = max(dot(n, sun), 0.0);
+  let trSun = grassTransmittance(hf, sun, g.cover);
+  var day = albedo * (sunCol * mix(lambertSun, kkSun, 0.45) * trSun * sh + AMBIENT * (0.5 + 0.5 * n.y) * ao);
+  let hSun = normalize(sun + v);
+  let thSun = dot(tangent, hSun);
+  day += sunCol * albedo * pow(sqrt(max(1.0 - thSun * thSun, 0.0)), 22.0) * 0.18 * trSun * sh;
+
+  let lumA = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
+  let nightAlbedo = mix(albedo, lumA * vec3f(0.65, 0.85, 1.0), 0.4);
+  let moon = moonDir();
+  let tlMoon = dot(tangent, moon);
+  let kkMoon = sqrt(max(1.0 - tlMoon * tlMoon, 0.0));
+  var night = nightAlbedo * (vec3f(0.28, 0.4, 0.68) * 0.16 * mix(max(dot(n, moon), 0.0), kkMoon, 0.5) * grassTransmittance(hf, moon, g.cover) + vec3f(0.006, 0.01, 0.026) * ao);
+  if (dayMix < 0.999) {
+    let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
+    let toDoorC = doorCenter - p;
+    let doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.3, 12.0);
+    var e2 = 0.0;
+    var spec = 0.0;
+    for (var j = 0; j < 3; j++) {
+      let o = DOOR_SAMPLES[j];
+      let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
+      let toL = s - p;
+      let d = max(length(toL), 0.05);
+      let l = toL / d;
+      let facing = max(dot(f.fwd, l), 0.0);
+      let geom = facing / (d * d + 0.6);
+      let tl = dot(tangent, l);
+      let kk = sqrt(max(1.0 - tl * tl, 0.0));
+      let lam = max(dot(n, l), 0.0) + 0.15;
+      let tr = grassTransmittance(hf, l, g.cover);
+      e2 += geom * mix(lam, kk, 0.5) * tr;
+      let hl = normalize(l + v);
+      let th = dot(tangent, hl);
+      spec += geom * pow(sqrt(max(1.0 - th * th, 0.0)), 16.0) * tr;
+    }
+    let front = dot(p - f.origin, f.fwd);
+    let inFront = select(0.0, 1.0, front < -0.01);
+    night += albedo * DOOR_COLOR * params.look.w * (e2 * 0.333 + spec * 0.1) * doorSh * inFront;
   }
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
@@ -855,11 +846,20 @@ fn render(ro: vec3f, rd: vec3f, pixelAngle: f32) -> vec3f {
       let n = terrainNormal(p, max(0.08, footprint * 0.5));
       color = shadeGround(p, n, rd, t, footprint, f, dayMix, rim);
     }
-    // The grass fur volume sits on the ground in front of whatever was hit.
-    let iv = furInterval(ro, rd, t);
+    // The blade layer rides on the terrain in front of the terrain hit.
+    var iv = vec2f(1.0, 0.0);
+    if (kind == 1) { iv = grassInterval(ro, rd, t); }
     if (iv.y > iv.x) {
-      let fur = furMarch(ro, rd, iv.x, iv.y, f, dayMix, rim, pixelAngle);
-      color = fur.color + color * (1.0 - fur.alpha);
+      let g = grassFrame((ro + rd * iv.y).xz);
+      if (g.cover > 0.01) {
+        let tg = grassMarch(ro, rd, iv.x, iv.y, g);
+        if (tg > 0.0) {
+          let pg = ro + rd * tg;
+          let frontG = dayFront(pg, f);
+          color = shadeGrass(pg, rd, g, f, frontG.x, frontG.y);
+          t = tg;
+        }
+      }
     }
     // Aerial perspective: night haze is heavier than the crisp day.
     let fogNight = skyNight(vec3f(rd.x, 0.02, rd.z)) * 0.9;
