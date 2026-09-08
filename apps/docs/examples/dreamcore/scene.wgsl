@@ -766,11 +766,11 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   let b0 = vnoise(p.xz * 25.0 + vec2f(3.0, 8.0));
   let micro = vec2f(vnoise((p.xz + vec2f(e2, 0.0)) * 25.0 + vec2f(3.0, 8.0)) - b0,
                     vnoise((p.xz + vec2f(0.0, e2)) * 25.0 + vec2f(3.0, 8.0)) - b0) / e2
-              * 0.0012 * (1.0 - smoothstep(0.01, 0.03, footprint));
+              * 0.0008 * (1.0 - smoothstep(0.01, 0.03, footprint));
   let n = normalize(vec3f(-(slope.x + r.grad.x + micro.x), 1.0, -(slope.y + r.grad.y + micro.y)));
   let shadow = duneShadow(p + vec3f(0.0, 0.05, 0.0), sun) * rippleShadow(p.xz, r, sun, slope);
   // The lip of each crest catches the low sun as a thin bright line.
-  let lip = smoothstep(0.85, 1.0, crestness) * 0.35;
+  let lip = smoothstep(0.85, 1.0, crestness) * 0.25;
   let v = -rd;
   let diffuse = orenNayar(n, sun, v, 0.6) * shadow;
   // The troughs between the ripples see less sky than the crests.
