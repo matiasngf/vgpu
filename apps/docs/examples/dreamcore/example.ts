@@ -97,7 +97,7 @@ interface Targets {
 const BLOOM_LEVELS = 5;
 const BLOOM_SIGMA = 2.6;
 /** Weight of each level's own glow when summing back up; the small mips carry the wide halo. */
-const BLOOM_WEIGHTS = [0.45, 0.3, 0.25, 0.2, 0.2];   // per level, summing to about 1.4 so a large bright area does not pile up its own glow
+const BLOOM_WEIGHTS = [0.32, 0.21, 0.18, 0.14, 0.15];   // per level, summing to 1 so the glow carries the same energy as the image it replaces
 
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1];
@@ -126,7 +126,7 @@ export const LOOK = {
   plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
   dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },
   sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 34, rippleCrest: 0.24 },
-  post: { exposure: 2.4, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  post: { exposure: 2.4, bloomStrength: 0.3, grain: 0.02, vignette: 0.3, nightThreshold: 0.0, dayThreshold: 0.0, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */

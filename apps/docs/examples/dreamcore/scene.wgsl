@@ -737,7 +737,7 @@ fn ggxSheen(n: vec3f, l: vec3f, v: vec3f, roughness: f32, f0: f32) -> f32 {
 
 // The desert is lit for its own daylight; through the night's exposure it would clip to a flat
 // yellow, so its light is scaled down before the shared tone curve.
-const SAND_EXPOSURE: f32 = 1.15;
+const SAND_EXPOSURE: f32 = 2.2;
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   // Golden sand at low sun, from the reference: lit smooth sand near sRGB (200,136,72), the

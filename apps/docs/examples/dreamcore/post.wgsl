@@ -41,7 +41,10 @@ fn lin2srgb(c: vec3f) -> vec3f {
   let b = textureSampleLevel(scene, samp, uv - ca, 0.0).b;
   let hdr = vec3f(r, g, b);
   let glow = textureSampleLevel(bloom, samp, uv, 0.0).rgb;
-  var color = (hdr + glow * post.bloomStrength) * post.exposure;
+  // All-pass bloom that conserves energy: every pixel trades a share of itself for its own
+  // multi-scale blur, so the whole frame gets a soft veil at the same brightness and the
+  // bright sand through the door spreads its light in proportion.
+  var color = mix(hdr, glow, post.bloomStrength) * post.exposure;
   color = softClip(color);
 
   let aspect = post.resolution.x / max(post.resolution.y, 1.0);
