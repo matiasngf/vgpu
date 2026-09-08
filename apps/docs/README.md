@@ -21,6 +21,18 @@
    - `lib/examples-source.generated.ts` for all example files.
    - `lib/example-thumbs.generated.ts`, which records which slugs have both PNGs. Missing PNGs fall back to the gradient placeholder in `<ExampleCard>`.
 
+### Debugging internal render targets headlessly
+
+- `node scripts/render-example-intermediates.mjs --slug <slug> --size 960x540 --time 6.2 --out ../../artifacts/<slug>` renders one example's `renderThumb` with `vgpu/node` and writes `final.png` plus one PNG per target the example reports through `onIntermediateRendered(kind, pixels, size)`.
+- It needs a healthy `vgpu doctor`; a software Vulkan driver is enough (`apt-get install mesa-vulkan-drivers`, then export `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` pointing at `lvp_icd.json`). A 960×540 frame of `spaceship-thrusters` renders in about a second on lavapipe, so you can iterate on shader detail without a browser.
+- Readback only supports 8-bit formats, so examples preview HDR targets through a tonemapping pass first (`spaceship-thrusters/debug-preview.wgsl` is a reusable template). `spaceship-thrusters` reports `noise-atlas`, `detail`, `concrete`, `concrete-normal`, `gravel`, `gravel-normal` (baked ground material atlases: four box-filtered levels with periodic borders, since targets have no mip chain), `shadow-map`, `scene-color`, `scene-depth`, `scene-normal`, `plume-grid`, `fire-hdr`, and `bloom`, plus `ao`, `scene-lit` and `composite` in the social pipeline.
+- `spaceship-thrusters` is lit as a night test: no sun, a key floodlight whose perspective shadow map stores distance to the light (`shadow.wgsl`), an unshadowed fill floodlight, and the plume as a segment light. `shadow-map` previews that distance.
+- `--quality social` on `render-example-intermediates.mjs` and `profile-example.mjs` selects `spaceship-thrusters`' heavier offline variant (direct per-step plume march at full resolution, which keeps the fibre micro-detail the grid averages away; screen-space ambient occlusion; higher-resolution bloom; and a lens pass with edge softness, vignette and film grain). The interactive page uses `RENDER_QUALITY` in `example.ts`; flip it to `'social'` to run the same pipeline in the browser. The plume passes are identical in both.
+
+- `node scripts/render-example-sequence.mjs --slug <slug> --frames 8 --dt 0.01667 --out <dir>` renders consecutive animated frames of an example that exports `renderSequence(gpu, target, frames, dt, onFrame, opts)`, one PNG per frame, to inspect temporal techniques (interleaved rendering, history blending) on moving content. `--size`, `--start`, `--quality` and `--camera` mirror the intermediates script; `--full-frames` renders every 2x2 phase per frame from an empty history so each frame is a complete plume, which is what you want when encoding an offline clip (`ffmpeg -framerate 30 -i frame-%03d.png ...`).
+- `--camera "px,py,pz/tx,ty,tz[/fov]"` on `render-example-intermediates.mjs` overrides the example's camera (examples opt in through `ThrusterThumbOptions.camera`), which is how the plume grid was checked from six angles against the direct march.
+- `node scripts/profile-example.mjs --slug <slug> --size 1280x720 --frames 20` times each pass of an example that exports `profile(gpu, target, frames)` (`spaceship-thrusters` reports scene, ao, grid, fire, bloom, composite and post; ao and post are zero in the fast pipeline). On lavapipe the numbers are CPU rasterization times, only meaningful relative to each other.
+
 ### Gotchas and safeguards
 
 - **Determinism:** `render-example-thumbs.mjs` enforces deterministic inputs. Do not sample wall-clock time or rely on JS `Date` inside `renderThumb`; use the `time`, `frames`, and `dt` provided via `meta.thumb`.
