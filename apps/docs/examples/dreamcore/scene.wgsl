@@ -698,9 +698,9 @@ fn sandSky(rd: vec3f) -> vec3f {
 }
 
 fn sandSun() -> vec3f {
-  // Low sun (22 degrees) from the right and behind the dunes: the near faces sit in shadow,
+  // Low sun (27 degrees) from the right and behind the dunes: the near faces sit in shadow,
   // their shadows fall across the flat sand, and the ripples light up on their far sides.
-  return normalize(vec3f(0.85, 0.39, 0.45));
+  return normalize(vec3f(0.85, 0.49, 0.45));
 }
 
 // Oren-Nayar rough diffuse: sand grains scatter back toward the light, so a rough surface
