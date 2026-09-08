@@ -748,8 +748,8 @@ fn skyDay(rd: vec3f) -> vec3f {
 
 // Night: a deep blue that keeps a faint glow at the horizon and falls to near-black overhead.
 fn skyNight(rd: vec3f) -> vec3f {
-  let horizon = rgb8(10.0, 18.0, 46.0);
-  let zenith = rgb8(5.0, 10.0, 32.0);
+  let horizon = rgb8(5.0, 9.0, 24.0);
+  let zenith = rgb8(2.0, 4.0, 11.0);
   return mix(horizon, zenith, smoothstep(0.0, 0.5, max(rd.y, 0.0)));
 }
 
