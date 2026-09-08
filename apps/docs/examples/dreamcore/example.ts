@@ -126,7 +126,7 @@ export const LOOK = {
   plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
   dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },
   sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
-  post: { exposure: 1.8, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  post: { exposure: 2.4, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
