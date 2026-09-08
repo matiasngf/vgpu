@@ -517,6 +517,13 @@ const RIPPLE_DIR_B: vec2f = vec2f(0.36, 0.93);   // the second set, 9 degrees of
 const RIPPLE_LEN_B: f32 = 0.86;                  // its wavelength relative to params.sand.y
 const RIPPLE_PHASE_B: f32 = 1.7;
 
+struct RippleField {
+  warp: f32,
+  ampA: f32,
+  ampB: f32,
+  amp: f32,     // ampA + ampB
+}
+
 struct Ripples {
   warp: f32,
   ampA: f32,
@@ -552,12 +559,31 @@ fn sandCamera() -> vec3f {
   return toDoor(vec3f(0.0, params.camera.x, 0.0), doorFrame());
 }
 
-fn rippleHeightAt(q: vec2f, r: Ripples) -> f32 {
+fn rippleHeightAt(q: vec2f, warp: f32, ampA: f32, ampB: f32) -> f32 {
   let len = max(params.sand.y, 0.02);
   let kA = 2.0 * PI / len;
   let kB = 2.0 * PI / (len * RIPPLE_LEN_B);
-  return r.ampA * rippleShape(dot(q, RIPPLE_DIR_A) * kA + r.warp).x
-       + r.ampB * rippleShape(dot(q, RIPPLE_DIR_B) * kB + r.warp * 0.8 + RIPPLE_PHASE_B).x;
+  return ampA * rippleShape(dot(q, RIPPLE_DIR_A) * kA + warp).x
+       + ampB * rippleShape(dot(q, RIPPLE_DIR_B) * kB + warp * 0.8 + RIPPLE_PHASE_B).x;
+}
+
+// The ripple field at p: how strong the ripples are there (patchy, on the flat sand only, gone
+// by the dune's toe, fading with the distance to the camera), which set of crests, and the
+// crest-line warp. Shared by the surface the rays hit and by the shading, so both agree.
+fn rippleField(p: vec2f) -> RippleField {
+  var f: RippleField;
+  f.warp = rippleWarp(p);
+  let onPlain = 1.0 - smoothstep(-1.5, 0.5, duneRise(p));
+  let dist = length(p - sandCamera().xz);
+  let near = 1.0 - smoothstep(params.sand.z * 0.5, params.sand.z, dist);
+  let patchy = smoothstep(0.3, 0.7, fbm3(p * 1.1 + vec2f(3.0, 7.0)));
+  f.amp = params.sand.x * (0.55 + 0.45 * patchy) * onPlain * near;
+  // Which set of crests: a quick handover near the door, wide (junctions everywhere) further in.
+  let width = mix(0.18, 0.3, smoothstep(2.0, 10.0, p.y));
+  let m = smoothstep(0.5 - width, 0.5 + width, fbm3(p * 0.6 + vec2f(5.0, 9.0)));
+  f.ampA = f.amp * (1.0 - m);
+  f.ampB = f.amp * m;
+  return f;
 }
 
 fn ripples(p: vec2f, footprint: f32) -> Ripples {
@@ -565,19 +591,13 @@ fn ripples(p: vec2f, footprint: f32) -> Ripples {
   let len = max(params.sand.y, 0.02);
   let kA = 2.0 * PI / len;
   let kB = 2.0 * PI / (len * RIPPLE_LEN_B);
-  r.warp = rippleWarp(p);
-  // On the flat sand only, gone by the dune's toe, and fading with the distance to the camera.
-  let onPlain = 1.0 - smoothstep(-1.5, 0.5, duneRise(p));
-  let dist = length(p - sandCamera().xz);
-  let near = 1.0 - smoothstep(params.sand.z * 0.5, params.sand.z, dist);
+  let f = rippleField(p);
+  // Ripples much finer than a pixel shade as smooth sand.
   let aa = 1.0 - smoothstep(len * 0.08, len * 0.35, footprint);
-  let patchy = smoothstep(0.3, 0.7, fbm3(p * 1.1 + vec2f(3.0, 7.0)));
-  r.amp = params.sand.x * (0.55 + 0.45 * patchy) * onPlain * near * aa;
-  // Which set of crests: a quick handover near the door, wide (junctions everywhere) further in.
-  let width = mix(0.18, 0.3, smoothstep(2.0, 10.0, p.y));
-  let m = smoothstep(0.5 - width, 0.5 + width, fbm3(p * 0.6 + vec2f(5.0, 9.0)));
-  r.ampA = r.amp * (1.0 - m);
-  r.ampB = r.amp * m;
+  r.warp = f.warp;
+  r.amp = f.amp * aa;
+  r.ampA = f.ampA * aa;
+  r.ampB = f.ampB * aa;
   let sA = rippleShape(dot(p, RIPPLE_DIR_A) * kA + r.warp);
   let sB = rippleShape(dot(p, RIPPLE_DIR_B) * kB + r.warp * 0.8 + RIPPLE_PHASE_B);
   r.h = r.ampA * sA.x + r.ampB * sB.x;
@@ -597,7 +617,7 @@ fn rippleShadow(p: vec2f, r: Ripples, sun: vec3f, slope: vec2f) -> f32 {
   for (var i = 1; i <= 12; i++) {
     let t = f32(i) * dt;
     let q = p + sun.xz * t;
-    let hq = rippleHeightAt(q, r);
+    let hq = rippleHeightAt(q, r.warp, r.ampA, r.ampB);
     let ray = r.h + (sun.y - dot(slope, sun.xz)) * t;
     s = min(s, clamp((ray - hq) / (0.35 * r.amp) + 0.5, 0.0, 1.0));
   }
@@ -618,6 +638,19 @@ fn duneShadow(p: vec3f, sun: vec3f) -> f32 {
   return s;
 }
 
+// The sand surface the rays actually hit: the dunes with the wind ripples as real relief, so
+// near the door the crests stand up, hide the troughs behind them and break the silhouette
+// instead of being painted onto a flat surface. The relief is the same field the shading
+// normal uses, so the two agree everywhere and the relief simply flattens out with the ripples'
+// own distance fade: there is no boundary between "displaced" and "flat" sand to hide.
+fn sandHeight(p: vec2f) -> f32 {
+  let h = duneHeight(p);
+  if (length(p - sandCamera().xz) > params.sand.z) { return h; }
+  let f = rippleField(p);
+  if (f.amp < 1e-5) { return h; }
+  return h + rippleHeightAt(p, f.warp, f.ampA, f.ampB);
+}
+
 fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   var t = 0.02;
   var lastT = 0.0;
@@ -626,7 +659,7 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   // holes of sky along their crests.
   for (var i = 0; i < 480; i++) {
     let p = ro + rd * t;
-    let d = p.y - duneHeight(p.xz);
+    let d = p.y - sandHeight(p.xz);
     // Sand within about a pixel of the ray counts as hit, so distant crests keep clean
     // silhouettes instead of sawing between the samples.
     if (d < 0.0005 * t) { hit = t; break; }
@@ -640,7 +673,7 @@ fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
   for (var i = 0; i < 6; i++) {
     let m = 0.5 * (a + b);
     let p = ro + rd * m;
-    if (p.y - duneHeight(p.xz) < 0.0005 * m) { b = m; } else { a = m; }
+    if (p.y - sandHeight(p.xz) < 0.0005 * m) { b = m; } else { a = m; }
   }
   return 0.5 * (a + b);
 }
