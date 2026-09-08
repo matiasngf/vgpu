@@ -1217,7 +1217,7 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, height: f32, f
 }
 
 fn shadeDoor(p: vec3f, n: vec3f, rd: vec3f, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
-  let albedo = rgb8(86.0, 94.0, 120.0);        // slate blue paint
+  let albedo = rgb8(236.0, 232.0, 224.0);      // white paint, a touch warm
   let sun = sunDir();
   let v = -rd;
   let sunCol = sunColor() * 0.784;
