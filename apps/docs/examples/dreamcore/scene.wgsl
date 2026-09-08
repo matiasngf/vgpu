@@ -638,17 +638,23 @@ fn duneShadow(p: vec3f, sun: vec3f) -> f32 {
   return s;
 }
 
+// How much of the ripple height the sand surface actually rises: the shading normal carries the
+// full profile (that is what draws the crest lines), the relief a fraction of it, so from the
+// low camera the crests stand up and shift with parallax without hiding the lit sand behind
+// them; at full height every crest would occlude the whole period behind it.
+const RIPPLE_RELIEF: f32 = 0.35;
+
 // The sand surface the rays actually hit: the dunes with the wind ripples as real relief, so
-// near the door the crests stand up, hide the troughs behind them and break the silhouette
-// instead of being painted onto a flat surface. The relief is the same field the shading
-// normal uses, so the two agree everywhere and the relief simply flattens out with the ripples'
-// own distance fade: there is no boundary between "displaced" and "flat" sand to hide.
+// near the door the crests stand up and break the silhouette instead of being painted onto a
+// flat surface. The relief is the same field the shading normal uses, so the two agree
+// everywhere and the relief simply flattens out with the ripples' own distance fade: there is
+// no boundary between "displaced" and "flat" sand to hide.
 fn sandHeight(p: vec2f) -> f32 {
   let h = duneHeight(p);
   if (length(p - sandCamera().xz) > params.sand.z) { return h; }
   let f = rippleField(p);
   if (f.amp < 1e-5) { return h; }
-  return h + rippleHeightAt(p, f.warp, f.ampA, f.ampB);
+  return h + RIPPLE_RELIEF * rippleHeightAt(p, f.warp, f.ampA, f.ampB);
 }
 
 fn marchDune(ro: vec3f, rd: vec3f) -> f32 {
@@ -779,10 +785,10 @@ fn skyDay(rd: vec3f) -> vec3f {
   return c;
 }
 
-// Night: a deep blue that keeps a faint glow at the horizon and falls to near-black overhead.
+// Night: an almost flat, deep blue.
 fn skyNight(rd: vec3f) -> vec3f {
-  let horizon = rgb8(5.0, 9.0, 24.0);
-  let zenith = rgb8(2.0, 4.0, 11.0);
+  let horizon = rgb8(13.0, 23.0, 56.0);
+  let zenith = rgb8(9.0, 16.0, 44.0);
   return mix(horizon, zenith, smoothstep(0.0, 0.5, max(rd.y, 0.0)));
 }
 
