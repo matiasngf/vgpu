@@ -714,6 +714,9 @@ fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
 // ---------------------------------------------------------------- lighting
 
 const AMBIENT: vec3f = vec3f(0.035, 0.09, 0.16);
+// Night fill over the meadow: a low blue moon and a faint sky ambient (both 1.6x the first tuning).
+const MOON_COLOR: vec3f = vec3f(0.0717, 0.1024, 0.1741);
+const NIGHT_AMBIENT: vec3f = vec3f(0.0096, 0.016, 0.0416);
 const DOOR_COLOR: vec3f = vec3f(1.0, 0.685, 0.335);   // sRGB (255,214,156) in linear
 
 fn sunDir() -> vec3f {
@@ -884,10 +887,8 @@ fn nightBase(albedo: vec3f, n: vec3f) -> vec3f {
   let lumA = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
   let nightAlbedo = mix(albedo, lumA * vec3f(0.65, 0.85, 1.0), 0.4);
   let moon = moonDir();
-  let moonColor = vec3f(0.28, 0.4, 0.68) * 0.16;
-  let nightAmbient = vec3f(0.006, 0.01, 0.026);
   let hemi = 0.5 + 0.5 * n.y;
-  return nightAlbedo * (moonColor * max(dot(n, moon), 0.0) + nightAmbient * hemi);
+  return nightAlbedo * (MOON_COLOR * max(dot(n, moon), 0.0) + NIGHT_AMBIENT * hemi);
 }
 
 fn rimGlow(n: vec3f, rim: f32) -> vec3f {
@@ -978,7 +979,7 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   let moon = moonDir();
   let tlMoon = dot(tangent, moon);
   let kkMoon = sqrt(max(1.0 - tlMoon * tlMoon, 0.0));
-  var night = nightAlbedo * (vec3f(0.28, 0.4, 0.68) * 0.16 * mix(max(dot(n, moon), 0.0), kkMoon, 0.5) * grassTransmittance(hf, moon, g.cover) + vec3f(0.006, 0.01, 0.026) * ao);
+  var night = nightAlbedo * (MOON_COLOR * mix(max(dot(n, moon), 0.0), kkMoon, 0.5) * grassTransmittance(hf, moon, g.cover) + NIGHT_AMBIENT * ao);
   if (dayMix < 0.999) {
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
@@ -1076,7 +1077,7 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, height: f32, f
   let moon = moonDir();
   let tlMoon = dot(tangent, moon);
   let kkMoon = sqrt(max(1.0 - tlMoon * tlMoon, 0.0));
-  var night = nightAlbedo * (vec3f(0.28, 0.4, 0.68) * 0.16 * mix(max(dot(n, moon), 0.0), kkMoon, 0.5) * grassTransmittance(hf, moon, cover) + vec3f(0.006, 0.01, 0.026) * ao);
+  var night = nightAlbedo * (MOON_COLOR * mix(max(dot(n, moon), 0.0), kkMoon, 0.5) * grassTransmittance(hf, moon, cover) + NIGHT_AMBIENT * ao);
   if (dayMix < 0.999) {
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
