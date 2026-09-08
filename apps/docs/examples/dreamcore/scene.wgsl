@@ -795,7 +795,7 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
 // a little over, without collapsing into the tone curve's shoulder. Every view of the sand
 // world goes through this, so the debug views show exactly what the door shows.
 fn sandFinish(col: vec3f, t: f32) -> vec3f {
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025)) * SAND_EXPOSURE;
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0018)) * SAND_EXPOSURE;
 }
 
 fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
