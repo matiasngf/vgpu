@@ -121,7 +121,7 @@ export const LOOK = {
   texture: 1,
   doorLight: 10,
   /** Blade patch around the door (radius in metres) and tallest blade height. */
-  grass: { radius: 60, height: 0.32 },
+  grass: { radius: 60, height: 0.22 },
   /** Rippled flat sand falling into a hollow, a backlit dune running in from the right, dunes growing to the horizon. */
   plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
   dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },

@@ -131,7 +131,7 @@ fn bladeHash(ii: u32, salt: f32) -> f32 {
   let r1 = bladeHash(ii, 8.0);
   let r2 = bladeHash(ii, 9.0);
   let len = (0.3 + 0.3 * r1 * r1 + 0.1 * r2) * blades.door.w * clamp(cover, 0.35, 1.2) * tuft;
-  let width = 0.005 + 0.006 * bladeHash(ii, 10.0);
+  let width = (0.005 + 0.006 * bladeHash(ii, 10.0)) * blades.door.w;   // keeps the blade's proportions as the height scales
   let theta0 = 0.25 + 0.4 * bladeHash(ii, 11.0);
   let theta1 = 1.25 + 0.5 * bladeHash(ii, 12.0);
   let twist = (bladeHash(ii, 13.0) - 0.5) * 1.4;
