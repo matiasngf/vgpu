@@ -53,6 +53,8 @@ export interface DreamcoreLookOverrides {
   dune?: Partial<{ start: number; slope: number; crest: number; skew: number }>;
   /** Wind ripples on the flat sand: amplitude (m), wavelength (m), distance from the camera where they have faded (m), crest position (0..1 of the period, low = steep side toward the door). */
   sand?: Partial<{ rippleAmp: number; rippleLen: number; rippleFade: number; rippleCrest: number }>;
+  /** Photographic finish: exposure multiplier, bloom mix, grain and vignette strength. */
+  post?: Partial<{ exposure: number; bloomStrength: number; grain: number; vignette: number }>;
 }
 
 /** One level of the bloom mip chain: its own blurred glow and the glow gathered from below. */
@@ -124,7 +126,7 @@ export const LOOK = {
   plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
   dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },
   sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
-  post: { exposure: 1.3, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
+  post: { exposure: 1.8, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 
 /** Night holds, the day sweeps out of the door, holds, then the night flows back in. */
@@ -327,7 +329,8 @@ function setBindings(effects: Effects, targets: Targets): void {
 
 function setFrame(effects: Effects, frame: DreamcoreFrameOptions, size: readonly [number, number]): void {
   const phase = Math.min(1, Math.max(0, frame.phase));
-  const { post, grass } = LOOK;
+  const { grass } = LOOK;
+  const post = { ...LOOK.post, ...frame.look?.post };
   const camera = { ...LOOK.camera, ...frame.look?.camera };
   const bladeCount = bladeCountOf(frame);
   const door = { ...LOOK.door, ...frame.look?.door };
@@ -365,7 +368,7 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions, size: readonly
   effects.brightPass.set({ bright: { threshold: post.nightThreshold + (post.dayThreshold - post.nightThreshold) * phase } });
   // Debug views skip the photographic finish so they stay readable.
   const finish = frame.debug ? { bloomStrength: 0, grain: 0, vignette: 0 } : { bloomStrength: post.bloomStrength, grain: post.grain, vignette: post.vignette };
-  effects.post.set({ post: { seed: 0.37 + (frame.time ?? 0) * 0.01, ...finish } });
+  effects.post.set({ post: { exposure: post.exposure, seed: 0.37 + (frame.time ?? 0) * 0.01, ...finish } });
 }
 
 async function prewarm(effects: Effects, targets: Targets, output: Output): Promise<void> {
