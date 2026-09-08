@@ -125,7 +125,7 @@ export const LOOK = {
   /** Rippled flat sand falling into a hollow, a backlit dune running in from the right, dunes growing to the horizon. */
   plain: { tiltFrom: 3.0, tilt: 0.06, far: -3.0 },
   dune: { start: 36, slope: 0.45, crest: 2.0, skew: 1.0 },
-  sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 26, rippleCrest: 0.32 },
+  sand: { rippleAmp: 0.04, rippleLen: 0.35, rippleFade: 34, rippleCrest: 0.24 },
   post: { exposure: 2.4, bloomStrength: 0.95, grain: 0.02, vignette: 0.3, nightThreshold: 0.16, dayThreshold: 0.7, knee: 0.1 },
 } as const;
 

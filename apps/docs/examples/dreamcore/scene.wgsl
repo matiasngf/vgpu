@@ -540,18 +540,19 @@ fn rippleWarp(p: vec2f) -> f32 {
        + 0.8 * (vnoise(p * 7.0 + vec2f(2.0, 5.0)) - 0.5) + 0.5 * (vnoise(p * 21.0 + vec2f(8.0, 1.0)) - 0.5);
 }
 
-// Ripple cross-section over one period of phase u: rounded troughs and a rounded crest at
+// Ripple cross-section over one period of phase u: rounded troughs and a sharp crest at
 // params.sand.w of the period (so the short steep side faces the door), heights in [0,1].
-// Returns (height, dheight/du).
+// Each flank is a quarter cosine, flat in the trough and still climbing at the crest, so the
+// two flanks meet in a ridge the way avalanching sand does. Returns (height, dheight/du).
 fn rippleShape(u: f32) -> vec2f {
   let a = clamp(params.sand.w, 0.1, 0.9);
   let v = fract(u / (2.0 * PI));
   if (v < a) {
     let s = v / a;
-    return vec2f(0.5 - 0.5 * cos(PI * s), 0.5 * PI * sin(PI * s) / (a * 2.0 * PI));
+    return vec2f(1.0 - cos(0.5 * PI * s), 0.5 * PI * sin(0.5 * PI * s) / (a * 2.0 * PI));
   }
   let s = (1.0 - v) / (1.0 - a);
-  return vec2f(0.5 - 0.5 * cos(PI * s), -0.5 * PI * sin(PI * s) / ((1.0 - a) * 2.0 * PI));
+  return vec2f(1.0 - cos(0.5 * PI * s), -0.5 * PI * sin(0.5 * PI * s) / ((1.0 - a) * 2.0 * PI));
 }
 
 // Camera position in door-local space (the sand world), for distance fades.
@@ -577,10 +578,11 @@ fn rippleField(p: vec2f) -> RippleField {
   let dist = length(p - sandCamera().xz);
   let near = 1.0 - smoothstep(params.sand.z * 0.5, params.sand.z, dist);
   let patchy = smoothstep(0.3, 0.7, fbm3(p * 1.1 + vec2f(3.0, 7.0)));
-  f.amp = params.sand.x * (0.55 + 0.45 * patchy) * onPlain * near;
-  // Which set of crests: a quick handover near the door, wide (junctions everywhere) further in.
-  let width = mix(0.18, 0.3, smoothstep(2.0, 10.0, p.y));
-  let m = smoothstep(0.5 - width, 0.5 + width, fbm3(p * 0.6 + vec2f(5.0, 9.0)));
+  f.amp = params.sand.x * (0.7 + 0.3 * patchy) * onPlain * near;
+  // Which set of crests: patches about a metre across hand over from one set to the other, so
+  // crest lines split and rejoin every few wavelengths; the handovers widen further in.
+  let width = mix(0.12, 0.22, smoothstep(2.0, 10.0, p.y));
+  let m = smoothstep(0.5 - width, 0.5 + width, fbm3(p * 1.0 + vec2f(5.0, 9.0)));
   f.ampA = f.amp * (1.0 - m);
   f.ampB = f.amp * m;
   return f;
@@ -701,6 +703,42 @@ fn sandSun() -> vec3f {
   return normalize(vec3f(0.85, 0.39, 0.45));
 }
 
+// Oren-Nayar rough diffuse: sand grains scatter back toward the light, so a rough surface
+// stays flatter-lit near the terminator and brightens at grazing angles instead of falling off
+// like Lambert. Returns the factor that multiplies albedo * light.
+fn orenNayar(n: vec3f, l: vec3f, v: vec3f, sigma: f32) -> f32 {
+  let ndl = max(dot(n, l), 0.0);
+  let ndv = max(dot(n, v), 1e-3);
+  let s2 = sigma * sigma;
+  let a = 1.0 - 0.5 * s2 / (s2 + 0.33);
+  let b = 0.45 * s2 / (s2 + 0.09);
+  let s = dot(l, v) - ndl * ndv;
+  let t = select(1.0, max(ndl, ndv), s > 0.0);
+  return ndl * (a + b * s / t);
+}
+
+// GGX specular lobe with Schlick Fresnel and Smith-Schlick masking: the glassy quartz
+// grains give sand a soft sheen that grows toward grazing angles and low sun.
+fn ggxSheen(n: vec3f, l: vec3f, v: vec3f, roughness: f32, f0: f32) -> f32 {
+  let hv = normalize(l + v);
+  let ndh = max(dot(n, hv), 0.0);
+  let ndv = max(dot(n, v), 1e-3);
+  let ndl = max(dot(n, l), 0.0);
+  let vdh = max(dot(v, hv), 0.0);
+  let alpha = roughness * roughness;
+  let a2 = alpha * alpha;
+  let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+  let d = a2 / (PI * dd * dd);
+  let k = alpha * 0.5;
+  let g = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
+  let f = f0 + (1.0 - f0) * pow(1.0 - vdh, 5.0);
+  return d * g * f / (4.0 * ndv);
+}
+
+// The desert is lit for its own daylight; through the night's exposure it would clip to a flat
+// yellow, so its light is scaled down before the shared tone curve.
+const SAND_EXPOSURE: f32 = 0.55;
+
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   // Golden sand at low sun, from the reference: lit smooth sand near sRGB (200,136,72), the
   // shadowed dune faces near (83,68,52) under a pale sky, ripple crests flaring to (191,128,70)
@@ -724,14 +762,17 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
 
   let n = normalize(vec3f(-(slope.x + r.grad.x), 1.0, -(slope.y + r.grad.y)));
   let shadow = duneShadow(p + vec3f(0.0, 0.05, 0.0), sun) * rippleShadow(p.xz, r, sun, slope);
-  let ndl = max(dot(n, sun), 0.0) * shadow;
+  let v = -rd;
+  let diffuse = orenNayar(n, sun, v, 0.6) * shadow;
   // The troughs between the ripples see less sky than the crests.
   let ao = mix(0.78, 1.0, crestness);
-  var col = albedo * (sunCol * ndl + amb * (0.6 + 0.4 * n.y) * ao);
-  let v = -rd;
+  // Bounce off the sunlit sand around: warm fill that reaches the faces turned away from the
+  // sun (the steep sides and the dune's shadowed flanks) more than the flat sand.
+  let bounce = rgb8(205.0, 140.0, 72.0) * sunCol * (0.05 + 0.4 * (1.0 - n.y));
+  var col = albedo * (sunCol * diffuse + (amb * (0.6 + 0.4 * n.y) + bounce) * ao);
   let h = normalize(sun + v);
-  // Sheen toward the sun: crests and rims catch the light.
-  col += albedo * pow(max(dot(n, h), 0.0), 10.0) * 0.8 * sunCol * shadow;
+  // Sheen of the quartz grains toward the sun: crests and rims catch the light.
+  col += ggxSheen(n, sun, v, 0.45, 0.04) * sunCol * shadow * 0.35;
   // A few grains catching the sun.
   let g = vec3f(hash12(gcell * 1.7 + vec2f(11.0, 3.0)), hash12(gcell * 2.3 + vec2f(3.0, 7.0)), hash12(gcell * 3.1 + vec2f(7.0, 11.0))) - 0.5;
   let gn = normalize(n + g * 1.2);
@@ -743,11 +784,11 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
 fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
   let t = marchDune(ro, rd);
   if (t < 0.0) {
-    return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0);
+    return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0) * SAND_EXPOSURE;
   }
   let p = ro + rd * t;
   let col = shadeSand(p, rd, pixelAngle * (tBase + t));
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025));
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025)) * SAND_EXPOSURE;
 }
 
 // ---------------------------------------------------------------- lighting
