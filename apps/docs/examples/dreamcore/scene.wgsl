@@ -737,7 +737,7 @@ fn ggxSheen(n: vec3f, l: vec3f, v: vec3f, roughness: f32, f0: f32) -> f32 {
 
 // The desert is lit for its own daylight; through the night's exposure it would clip to a flat
 // yellow, so its light is scaled down before the shared tone curve.
-const SAND_EXPOSURE: f32 = 2.2;
+const SAND_EXPOSURE: f32 = 1.6;
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   // Golden sand at low sun, from the reference: lit smooth sand near sRGB (200,136,72), the
@@ -770,7 +770,7 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   let n = normalize(vec3f(-(slope.x + r.grad.x + micro.x), 1.0, -(slope.y + r.grad.y + micro.y)));
   let shadow = duneShadow(p + vec3f(0.0, 0.05, 0.0), sun) * rippleShadow(p.xz, r, sun, slope);
   // The lip of each crest catches the low sun as a thin bright line.
-  let lip = smoothstep(0.85, 1.0, crestness) * 0.5;
+  let lip = smoothstep(0.85, 1.0, crestness) * 0.35;
   let v = -rd;
   let diffuse = orenNayar(n, sun, v, 0.6) * shadow;
   // The troughs between the ripples see less sky than the crests.
