@@ -861,12 +861,29 @@ fn dayFront(p: vec3f, f: DoorFrame) -> vec2f {
   return vec2f(day, rim);
 }
 
-const DOOR_SAMPLE_COUNT: i32 = 6;
-const DOOR_SAMPLES: array<vec2f, 6> = array<vec2f, 6>(
-  vec2f(-0.23, 0.35), vec2f(0.23, 0.35), vec2f(-0.23, 1.04), vec2f(0.23, 1.04), vec2f(-0.23, 1.73), vec2f(0.23, 1.73));
+const DOOR_SAMPLE_COUNT: i32 = 12;
+const DOOR_SAMPLE_COLS: i32 = 3;
+const DOOR_SAMPLE_ROWS: i32 = 4;
+
+// Per-pixel jitter for the door light's sample points, set once per fragment in fs_main.
+var<private> doorJitter: vec2f = vec2f(0.5, 0.5);
+
+// The i-th sample point on the opening (x across the sill, y above it, metres): a 3 x 4 grid
+// over the opening, each cell jittered by a per-pixel offset that also differs per cell, so
+// the sample set changes from pixel to pixel and from pass to pass. A fixed grid stamped the
+// same few shadow copies everywhere (visible behind small casters like the knob); the jittered
+// sets average into one smooth penumbra over the frame's passes.
+fn doorSample(i: i32) -> vec2f {
+  let cx = f32(i % DOOR_SAMPLE_COLS);
+  let cy = f32(i / DOOR_SAMPLE_COLS);
+  let j = fract(doorJitter + f32(i) * vec2f(0.7548776662, 0.5698402909));
+  let u = (cx + j.x) / f32(DOOR_SAMPLE_COLS);
+  let v = (cy + j.y) / f32(DOOR_SAMPLE_ROWS);
+  return vec2f((u - 0.5) * DOOR_W, v * DOOR_H);
+}
 
 // Light from the sunlit dune pouring through the opening: a warm rectangular area light
-// sampled at six points, each with its own shadow ray, so penumbras stay soft.
+// sampled at twelve jittered points, each with its own shadow ray, so penumbras stay soft.
 // `tangent` enables Kajiya-Kay fibre shading for blades (zero vector for surfaces).
 fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shadows: bool) -> vec3f {
   let front = dot(p - f.origin, f.fwd);
@@ -874,7 +891,7 @@ fn doorLight(p: vec3f, n: vec3f, tangent: vec3f, transl: f32, f: DoorFrame, shad
   let fibre = dot(tangent, tangent) > 0.5;
   var sum = 0.0;
   for (var i = 0; i < DOOR_SAMPLE_COUNT; i++) {
-    let o = DOOR_SAMPLES[i];
+    let o = doorSample(i);
     let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
     let toL = s - p;
     let d = max(length(toL), 0.05);
@@ -910,7 +927,7 @@ fn doorScatter(ro: vec3f, rd: vec3f, tEnd: f32, f: DoorFrame) -> vec3f {
     if (dot(q - f.origin, f.fwd) > -0.01) { continue; }
     var e = 0.0;
     for (var j = 0; j < DOOR_SAMPLE_COUNT; j++) {
-      let o = DOOR_SAMPLES[j];
+      let o = doorSample(j);
       let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
       let toL = s - q;
       let d = max(length(toL), 0.3);
@@ -1091,7 +1108,7 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
     var e2 = 0.0;
     var spec = 0.0;
     for (var j = 0; j < DOOR_SAMPLE_COUNT; j++) {
-      let o = DOOR_SAMPLES[j];
+      let o = doorSample(j);
       let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
       let toL = s - p;
       let d = max(length(toL), 0.05);
@@ -1187,7 +1204,7 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, height: f32, f
     var e2 = 0.0;
     var spec = 0.0;
     for (var j = 0; j < DOOR_SAMPLE_COUNT; j++) {
-      let o = DOOR_SAMPLES[j];
+      let o = doorSample(j);
       let s = f.origin + f.right * o.x + vec3f(0.0, o.y, 0.0);
       let toL = s - p;
       let d = max(length(toL), 0.05);
@@ -1435,6 +1452,8 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
   // One sub-pixel sample per pass (params.blades.xy); the passes add up in the target.
   let pixel = vec2i(uv * res);
   let px = uv * res + params.blades.xy - vec2f(0.5);
+  // The door light's sample jitter: a different offset per pixel and per pass.
+  doorJitter = vec2f(hash12(px * 0.731 + vec2f(3.1, 7.7)), hash12(px * 0.547 + vec2f(9.3, 1.9)));
   let ndc = (px / res) * 2.0 - 1.0;
   let sx = ndc.x * aspect;
   let sy = -ndc.y;
