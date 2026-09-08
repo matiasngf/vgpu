@@ -737,7 +737,7 @@ fn ggxSheen(n: vec3f, l: vec3f, v: vec3f, roughness: f32, f0: f32) -> f32 {
 
 // The desert is lit for its own daylight; through the night's exposure it would clip to a flat
 // yellow, so its light is scaled down before the shared tone curve.
-const SAND_EXPOSURE: f32 = 0.55;
+const SAND_EXPOSURE: f32 = 1.15;
 
 fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   // Golden sand at low sun, from the reference: lit smooth sand near sRGB (200,136,72), the
@@ -752,7 +752,7 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   let r = ripples(p.xz, footprint);
   // Grains: speckle about two pixels wide wherever the sand is, so the crest lines read grainy
   // near the door and the texture melts into smooth sand further in instead of aliasing.
-  let gsize = max(0.0012, footprint * 2.6);
+  let gsize = max(0.0008, footprint * 1.7);
   let gcell = floor(p.xz / gsize);
   let crestness = clamp(r.h / max(r.amp, 1e-4), 0.0, 1.0);
   let grainAmp = mix(1.0, 0.4, smoothstep(0.003, 0.015, footprint));
@@ -760,8 +760,17 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
             + (vnoise(p.xz * 180.0) - 0.5) * 0.08 + (vnoise(p.xz * 45.0 + vec2f(9.0, 2.0)) - 0.5) * 0.06;
   albedo *= 1.0 + grain;
 
-  let n = normalize(vec3f(-(slope.x + r.grad.x), 1.0, -(slope.y + r.grad.y)));
+  // Grain-scale unevenness: the sand between the crests is never flat, so under the grazing
+  // sun it shows a faint pebbling (about 1 mm over 4 cm), gone once a pixel spans a cell.
+  let e2 = 0.004;
+  let b0 = vnoise(p.xz * 25.0 + vec2f(3.0, 8.0));
+  let micro = vec2f(vnoise((p.xz + vec2f(e2, 0.0)) * 25.0 + vec2f(3.0, 8.0)) - b0,
+                    vnoise((p.xz + vec2f(0.0, e2)) * 25.0 + vec2f(3.0, 8.0)) - b0) / e2
+              * 0.0012 * (1.0 - smoothstep(0.01, 0.03, footprint));
+  let n = normalize(vec3f(-(slope.x + r.grad.x + micro.x), 1.0, -(slope.y + r.grad.y + micro.y)));
   let shadow = duneShadow(p + vec3f(0.0, 0.05, 0.0), sun) * rippleShadow(p.xz, r, sun, slope);
+  // The lip of each crest catches the low sun as a thin bright line.
+  let lip = smoothstep(0.85, 1.0, crestness) * 0.5;
   let v = -rd;
   let diffuse = orenNayar(n, sun, v, 0.6) * shadow;
   // The troughs between the ripples see less sky than the crests.
@@ -769,7 +778,7 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   // Bounce off the sunlit sand around: warm fill that reaches the faces turned away from the
   // sun (the steep sides and the dune's shadowed flanks) more than the flat sand.
   let bounce = rgb8(205.0, 140.0, 72.0) * sunCol * (0.05 + 0.4 * (1.0 - n.y));
-  var col = albedo * (sunCol * diffuse + (amb * (0.6 + 0.4 * n.y) + bounce) * ao);
+  var col = albedo * (sunCol * diffuse * (1.0 + lip) + (amb * (0.6 + 0.4 * n.y) + bounce) * ao);
   let h = normalize(sun + v);
   // Sheen of the quartz grains toward the sun: crests and rims catch the light.
   col += ggxSheen(n, sun, v, 0.45, 0.04) * sunCol * shadow * 0.35;
@@ -781,14 +790,21 @@ fn shadeSand(p: vec3f, rd: vec3f, footprint: f32) -> vec3f {
   return col;
 }
 
+// Haze toward the horizon, then the desert's own exposure: the sand world is lit for its
+// daylight and scaled into the night's exposure here, so through the door it reads bright,
+// a little over, without collapsing into the tone curve's shoulder. Every view of the sand
+// world goes through this, so the debug views show exactly what the door shows.
+fn sandFinish(col: vec3f, t: f32) -> vec3f {
+  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025)) * SAND_EXPOSURE;
+}
+
 fn renderSand(ro: vec3f, rd: vec3f, pixelAngle: f32, tBase: f32) -> vec3f {
   let t = marchDune(ro, rd);
   if (t < 0.0) {
     return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0) * SAND_EXPOSURE;
   }
   let p = ro + rd * t;
-  let col = shadeSand(p, rd, pixelAngle * (tBase + t));
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(t - 30.0, 0.0) * 0.0025)) * SAND_EXPOSURE;
+  return sandFinish(shadeSand(p, rd, pixelAngle * (tBase + t)), t);
 }
 
 // ---------------------------------------------------------------- lighting
@@ -1363,7 +1379,7 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec
     let n = doorNormal(p, f);
     return rgb8(86.0, 94.0, 120.0) * (0.35 + 0.65 * max(dot(n, sandSun()), 0.0));
   }
-  if (tDune < 0.0) { return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0); }
+  if (tDune < 0.0) { return select(SAND_HORIZON, sandSky(rd), rd.y > 0.0) * SAND_EXPOSURE; }
   let p = ro + rd * tDune;
   let footprint = pixelAngle * tDune;
   var col = shadeSand(p, rd, footprint);
@@ -1374,7 +1390,7 @@ fn renderDebugWorld(ro: vec3f, rd: vec3f, pixelAngle: f32, overlays: i32) -> vec
   if (overlays > 1) {
     col = mix(col, vec3f(0.15, 0.9, 0.25), 0.4 * portalVisible(p));
   }
-  return mix(col, SAND_HORIZON, 1.0 - exp(-max(tDune - 30.0, 0.0) * 0.0025));
+  return sandFinish(col, tDune);
 }
 
 // Top-down map of the sand world: x in [-6, 6], z in [-2, 22] (camera side at the bottom),
@@ -1386,7 +1402,7 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
   let p2 = vec2f(x, z);
   let h = duneHeight(p2);
   let p = vec3f(x, h, z);
-  var col = shadeSand(p, vec3f(0.0, -1.0, 0.0), footprint);
+  var col = shadeSand(p, vec3f(0.0, -1.0, 0.0), footprint) * SAND_EXPOSURE;
   let gm = max(length(duneGradient(p2)), 1e-3);
   let dist = abs(fract(h / 0.25 + 0.5) - 0.5) * 0.25 / gm;
   col = mix(col, vec3f(0.35, 0.15, 0.05), smoothstep(footprint * 2.0, 0.0, dist) * 0.75);
