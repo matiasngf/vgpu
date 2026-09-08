@@ -67,6 +67,7 @@ interface Effects {
   scene: Effect;
   grassTile: GrassTile;
   blades: Draw;
+  bladesShadow: Draw;   // the same blades, rasterised from the door light
   brightPass: Effect;
   bloom: BloomLevel[];
   post: Effect;
@@ -81,7 +82,8 @@ interface BloomTargets {
 
 interface Targets {
   scene: Target;
-  gbuffer: Target;   // geometric blades: distance + tangent, albedo + position along the blade
+  gbuffer: Target;     // geometric blades: distance + tangent, albedo + position along the blade
+  shadowMap: Target;   // the blades from the door light: distance from it
   bloom: BloomTargets[];
 }
 
@@ -105,6 +107,8 @@ const CLEAR_ZERO: readonly [number, number, number, number] = [0, 0, 0, 0];
  */
 const BLADE_ZONE = { inner: 2.5, knee: 10, outer: 40, nearFraction: 0.25 } as const;
 const BLADE_VERTICES = 36;   // six quads between seven spine samples
+/** Paraboloid shadow map of the blades from the door light: size in pixels, light height above the sill, depth bias. */
+const BLADE_SHADOW = { size: 3072, height: 1.04, bias: 0.03 } as const;
 
 /** Scene constants measured against the reference photos; see scene.wgsl for the units. */
 export const LOOK = {
@@ -217,6 +221,7 @@ function createEffects(gpu: Gpu, label: string): Effects {
     scene: gpu.effect(sceneWgsl, { label: `${label}-scene`, blend: 'additive' }),
     grassTile: createGrassTile(gpu, 2048, `${label}-grass-tile`),
     blades: gpu.draw({ shader: grassBladesWgsl, label: `${label}-blades`, vertices: BLADE_VERTICES }),
+    bladesShadow: gpu.draw({ shader: grassBladesWgsl, label: `${label}-blades-shadow`, vertices: BLADE_VERTICES }),
     brightPass: gpu.effect(brightPassWgsl, { label: `${label}-bright-pass` }),
     // Every pass owns its effect, and so its uniform buffer; sharing one would make each
     // pass observe the last values written in the frame.
@@ -246,6 +251,7 @@ function createTargets(gpu: Gpu, size: readonly [number, number], label: string)
   return {
     scene: gpu.target({ size: full, format: HDR_FORMAT, label: `${label}-scene` }),
     gbuffer: gpu.target({ size: full, colors: [{ format: 'rgba32float' }, { format: 'rgba16float' }], depth: true, label: `${label}-blades` }),
+    shadowMap: gpu.target({ size: [BLADE_SHADOW.size, BLADE_SHADOW.size], colors: [{ format: 'rgba32float' }, { format: 'rgba8unorm' }], depth: true, label: `${label}-blades-shadow` }),
     bloom,
   };
 }
@@ -265,17 +271,21 @@ function setConstants(effects: Effects): void {
       dune: [LOOK.dune.start, LOOK.dune.slope, LOOK.dune.crest, LOOK.dune.skew],
       sand: [LOOK.sand.rippleAmp, LOOK.sand.rippleLen, LOOK.sand.rippleFade, LOOK.sand.rippleCrest],
       blades: [0.5, 0.5, 0, 1],
+      shadow: [0, BLADE_SHADOW.height + 0.02, BLADE_SHADOW.bias, 0],
     },
   });
-  effects.blades.set({
-    blades: {
-      camera: [camera.height, camera.pitch, camera.fovY, 1],
-      jitter: [0, 0, 0, 0],
-      door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
-      zone: [BLADE_ZONE.inner, BLADE_ZONE.knee, BLADE_ZONE.outer, BLADE_ZONE.nearFraction],
-      count: [0, 0, 0, 0],
-    },
-  });
+  for (const [draw, light] of [[effects.blades, 0], [effects.bladesShadow, 1]] as const) {
+    draw.set({
+      blades: {
+        camera: [camera.height, camera.pitch, camera.fovY, 1],
+        jitter: [0, 0, 0, 0],
+        door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
+        zone: [BLADE_ZONE.inner, BLADE_ZONE.knee, BLADE_ZONE.outer, BLADE_ZONE.nearFraction],
+        count: [0, 0, 0, 0],
+        light: [light, BLADE_SHADOW.height, 0, 0],
+      },
+    });
+  }
   effects.brightPass.set({ samp: effects.sampler, bright: { threshold: post.nightThreshold, knee: post.knee } });
   effects.bloom.forEach((level, i) => {
     level.down?.set({ samp: effects.sampler });
@@ -298,6 +308,7 @@ function setBindings(effects: Effects, targets: Targets): void {
     tileSamp: effects.sampler,
     bladeDist: targets.gbuffer.colors[0],
     bladeColor: targets.gbuffer.colors[1]!,
+    bladeShadow: targets.shadowMap.colors[0],
   });
   effects.brightPass.set({ src: targets.scene });
   effects.bloom.forEach((level, i) => {
@@ -335,16 +346,21 @@ function setFrame(effects: Effects, frame: DreamcoreFrameOptions, size: readonly
       dune: [dune.start, dune.slope, dune.crest, dune.skew],
       sand: [sand.rippleAmp, sand.rippleLen, sand.rippleFade, sand.rippleCrest],
       blades: [0.5, 0.5, bladeCount > 0 ? BLADE_ZONE.outer : 0, 1],
+      // The sill sits 2 cm under the terrain; the light height is measured from the terrain.
+      shadow: [bladeCount > 0 ? BLADE_SHADOW.size : 0, BLADE_SHADOW.height + 0.02, BLADE_SHADOW.bias, 0],
     },
   });
-  effects.blades.set({
-    blades: {
-      camera: [camera.height, camera.pitch, camera.fovY, size[0] / Math.max(1, size[1])],
-      jitter: [0, 0, frame.wind ?? 0, frame.time ?? 0],
-      door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
-      count: [bladeCount, 0, 0, 0],
-    },
-  });
+  // Both blade draws must place the blades identically: same camera wedge, same count.
+  for (const draw of [effects.blades, effects.bladesShadow]) {
+    draw.set({
+      blades: {
+        camera: [camera.height, camera.pitch, camera.fovY, size[0] / Math.max(1, size[1])],
+        jitter: [0, 0, frame.wind ?? 0, frame.time ?? 0],
+        door: [door.x, door.z, grass.radius, grass.height / TILE_HEIGHT],
+        count: [bladeCount, 0, 0, 0],
+      },
+    });
+  }
   // The door only needs to bloom at night; by day the threshold rises so the field stays crisp.
   effects.brightPass.set({ bright: { threshold: post.nightThreshold + (post.dayThreshold - post.nightThreshold) * phase } });
   // Debug views skip the photographic finish so they stay readable.
@@ -356,7 +372,7 @@ async function prewarm(effects: Effects, targets: Targets, output: Output): Prom
   const level0 = targets.bloom[0]!;
   await Promise.all([
     effects.scene.compile(targets.scene), effects.brightPass.compile(level0.glow), effects.grassTile.draw.compile(effects.grassTile.target),
-    effects.blades.compile(targets.gbuffer),
+    effects.blades.compile(targets.gbuffer), effects.bladesShadow.compile(targets.shadowMap),
     ...effects.bloom.flatMap((level, i) => {
       const mine = targets.bloom[i]!;
       return [level.down?.compile(mine.glow), level.blurH.compile(mine.temp), level.blurV.compile(mine.glow), level.up?.compile(mine.acc)];
@@ -412,6 +428,10 @@ function renderFrame(gpu: Gpu, effects: Effects, targets: Targets, output: Targe
   const size = targets.scene.size;
   setFrame(effects, frameOpts, size);
   const bladeCount = bladeCountOf(frameOpts);
+  if (bladeCount > 0) {
+    // The blades from the door light, once per still: their shadows on each other.
+    gpu.frame((frame) => frame.pass({ target: targets.shadowMap, clear: CLEAR_ZERO }, (pass) => pass.draw(effects.bladesShadow, { instances: bladeCount, vertices: BLADE_VERTICES })));
+  }
   const n = Math.max(1, Math.round(Math.sqrt(frameOpts.samples ?? 1)));
   const total = n * n;
   for (let i = 0; i < total; i++) {

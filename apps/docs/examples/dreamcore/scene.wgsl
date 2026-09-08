@@ -24,6 +24,7 @@ struct Params {
   dune: vec4f,       // the dune: start (m behind the sill), stoss slope (tan), crest (m), crest line skew (tan)
   sand: vec4f,       // wind ripples on the flat sand: amplitude (m), wavelength (m), fade distance from the camera (m), crest position (0..1 of the period)
   blades: vec4f,     // sub-pixel sample offset (x, y in 0..1), geometric blade zone radius (m, 0 = none), sample weight
+  shadow: vec4f,     // blade shadow map: size (px, 0 = none), light height above the sill (m), depth bias (m), unused
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -31,7 +32,8 @@ struct Params {
 @group(0) @binding(2) var tileTangent: texture_2d<f32>;  // xyz blade tangent * 0.5 + 0.5 (tile space), w along-blade
 @group(0) @binding(3) var tileSamp: sampler;
 @group(0) @binding(4) var bladeDist: texture_2d<f32>;    // geometric blades: distance along the ray (0 = none), tangent
-@group(0) @binding(5) var bladeColor: texture_2d<f32>;   // geometric blades: linear albedo, fraction along the blade
+@group(0) @binding(5) var bladeColor: texture_2d<f32>;   // geometric blades: linear albedo, height above the terrain (m)
+@group(0) @binding(6) var bladeShadow: texture_2d<f32>;  // the blades seen from the door light: distance from it (0 = none)
 
 const PI: f32 = 3.14159265359;
 const DOOR_W: f32 = 0.92;   // opening width
@@ -1019,12 +1021,39 @@ fn shadeGrass(p: vec3f, rd: vec3f, g: GrassFrame, f: DoorFrame, dayMix: f32, rim
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
 
+// Blades shadowing blades under the door light: the blades rasterised from the door into a
+// paraboloid map (grass-blades.wgsl), looked up over 3x3 taps. The door faces -z (yaw 0).
+fn bladeShadowAt(p: vec3f, f: DoorFrame) -> f32 {
+  let size = params.shadow.x;
+  if (size < 1.0) { return 1.0; }
+  let d = p - (f.origin + vec3f(0.0, params.shadow.y, 0.0));
+  let r = length(d);
+  let dir = d / max(r, 1e-4);
+  if (dir.z > -0.02) { return 1.0; }
+  let uv = dir.xy / (1.0 - dir.z);
+  let px = vec2f(uv.x * 0.5 + 0.5, 0.5 - uv.y * 0.5) * size;
+  var lit = 0.0;
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      let c = vec2i(clamp(px + vec2f(f32(i), f32(j)) * 1.6, vec2f(0.0), vec2f(size - 1.0)));
+      let stored = textureLoad(bladeShadow, c, 0).x;
+      lit += select(1.0, 0.0, stored > 0.0 && r - params.shadow.z > stored);
+    }
+  }
+  return lit / 9.0;
+}
+
 // A geometric blade from the G-buffer: the same fibre shading as the relief, lit by the sun
 // (day) or the moon and the door (night), with the light attenuated through the sward by the
 // blade's position along its length.
-fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, hf0: f32, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
-  let hf = clamp(hf0, 0.0, 1.0);   // interpolation can overshoot the tip by a hair, and pow() would turn that into NaN
+fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, height: f32, f: DoorFrame, dayMix: f32, rim: f32) -> vec3f {
   let cover = grassCoverage(p.xz);
+  // Where this point sits in the sward: its height against the local canopy (the tallest
+  // blades here), so short blades and low parts of tall ones are deep inside it and get the
+  // light attenuated the way the relief's layer did.
+  let tuft = 0.7 + 0.6 * vnoise(p.xz * 2.4 + vec2f(3.0, 11.0));
+  let canopy = 1.4 * params.grass.y * clamp(cover, 0.35, 1.2) * tuft;   // the tallest blades reach past the relief's ceiling
+  let hf = clamp(height / max(canopy, 0.05), 0.0, 1.0);
   // Mean normal of a thin blade: as far up as its tangent allows.
   var n = vec3f(0.0, 1.0, 0.0) - tangent * tangent.y;
   n = normalize(select(n, vec3f(0.0, 0.0, -1.0), dot(n, n) < 1e-4));
@@ -1052,9 +1081,11 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, hf0: f32, f: D
     let doorCenter = f.origin + vec3f(0.0, DOOR_H * 0.5, 0.0);
     let toDoorC = doorCenter - p;
     let near = length(toDoorC) < 14.0;
-    var doorSh = 1.0;
+    // The blades in front of this one, from the door's shadow map.
+    let selfSh = bladeShadowAt(p, f);
+    var doorSh = selfSh;
     if (!near) {
-      doorSh = doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0);
+      doorSh *= doorShadow(p + vec3f(0.0, 0.02, 0.0), normalize(toDoorC), f, length(toDoorC) - 0.03, 40.0);
     }
     var e2 = 0.0;
     var spec = 0.0;
@@ -1069,10 +1100,12 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, hf0: f32, f: D
       let tl = dot(tangent, l);
       let kk = sqrt(max(1.0 - tl * tl, 0.0));
       let lam = max(dot(n, l), 0.0) + 0.05;
-      let tr = grassTransmittance(hf, l, cover);
+      // The shadow map already holds the blades in the way; keep only a little of the
+      // statistical attenuation for the sward finer than the map resolves.
+      let tr = mix(1.0, grassTransmittance(hf, l, cover), 0.5);
       var vis = doorSh;
       if (near) {
-        vis = doorShadow(p + vec3f(0.0, 0.02, 0.0), l, f, d - 0.03, 40.0);
+        vis = selfSh * doorShadow(p + vec3f(0.0, 0.02, 0.0), l, f, d - 0.03, 40.0);
       }
       e2 += geom * mix(lam, kk, 0.3) * tr * vis;
       let hl = normalize(l + v);
@@ -1081,9 +1114,7 @@ fn shadeBlade(p: vec3f, rd: vec3f, tangent: vec3f, albedo: vec3f, hf0: f32, f: D
     }
     let front = dot(p - f.origin, f.fwd);
     let inFront = select(0.0, 1.0, front < -0.01);
-    // Blades stand among neighbours that the G-buffer does not know about: take a third of
-    // the spill away for that, which lands the lit lawn where the relief's shadow walks put it.
-    night += albedo * DOOR_COLOR * params.look.w * (e2 + spec * 0.3) / f32(DOOR_SAMPLE_COUNT) * inFront * 0.65;
+    night += albedo * DOOR_COLOR * params.look.w * (e2 + spec * 0.3) / f32(DOOR_SAMPLE_COUNT) * inFront * 0.45;
   }
   return mix(night, day, dayMix) + albedo * rimGlow(n, rim);
 }
@@ -1312,10 +1343,13 @@ fn renderDebugMap(uv: vec2f) -> vec3f {
   let sy = -ndc.y;
   var color = vec3f(0.0);
   if (params.debug.x > 4.5) {
-    // The geometric blade G-buffer: distance as grey (50 m = white), blade albedo as a hint of colour.
+    // The geometric blade G-buffer: distance (red, 50 m = 1) and the blades' shadow on each
+    // other from the door light (green, lit = 0.5).
     let bd = textureLoad(bladeDist, pixel, 0);
-    let bc = textureLoad(bladeColor, pixel, 0);
-    color = vec3f(bd.x / 50.0) + bc.rgb * 0.15;
+    let rdB = normalize(forward * focal + right * sx + up * sy);
+    var sh = 0.0;
+    if (bd.x > 0.0) { sh = bladeShadowAt(ro + rdB * bd.x, doorFrame()); }
+    color = vec3f(bd.x / 50.0, sh * 0.5, 0.0);
   } else if (params.debug.x > 2.5) {
     // The main camera carried into the sand world: same place, pitch and lens, so the
     // composition of the sand behind the door can be read as the door frames it.

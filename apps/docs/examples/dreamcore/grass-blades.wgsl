@@ -12,13 +12,20 @@ struct Blades {
   door: vec4f,     // door x, door z, grass patch radius (m), blade height scale
   zone: vec4f,     // inner radius (m), knee radius (m), outer radius (m), fraction of instances inside the knee
   count: vec4f,    // instance count, unused
+  light: vec4f,    // 1 = rasterise the door light's shadow map instead of the camera view, light height above the sill (m)
 }
 
 @group(0) @binding(0) var<uniform> blades: Blades;
 
 const PI: f32 = 3.14159265359;
 const SPINE: i32 = 7;            // samples along a blade, as in the tile mesh
-const FAR: f32 = 200.0;          // depth range of the pass (m)
+const FAR: f32 = 200.0;          // depth range of the camera pass (m)
+const SHADOW_FAR: f32 = 60.0;    // depth range of the shadow map (m)
+
+// The door light, a little above the middle of the opening (the door faces -z: yaw is 0).
+fn lightPosition() -> vec3f {
+  return vec3f(blades.door.x, terrainHeight(blades.door.xy) + blades.light.y, blades.door.y);
+}
 
 // ---- noise, shared with scene.wgsl (keep identical)
 
@@ -86,6 +93,7 @@ struct VertexOut {
   @location(0) world: vec3f,
   @location(1) tangent: vec3f,
   @location(2) extra: vec2f,     // (fraction along the blade, per-blade seed)
+  @location(3) baseY: f32,       // terrain height under the blade
 }
 
 fn bladeHash(ii: u32, salt: f32) -> f32 {
@@ -159,29 +167,42 @@ fn bladeHash(ii: u32, salt: f32) -> f32 {
   var pos = p + wv * w * side;
   if (!keep) { pos = vec3f(0.0, -100.0, 0.0); }   // collapsed: nothing rasterises
 
-  // The scene camera: at (0, height, 0), pitched, looking along +z. The jitter shifts the
-  // projection so the pixel centre coincides with the raymarcher's sub-pixel sample.
-  let ro = vec3f(0.0, blades.camera.x, 0.0);
-  let cp = cos(blades.camera.y);
-  let sp = sin(blades.camera.y);
-  let fwd = vec3f(0.0, sp, cp);
-  let up = vec3f(0.0, cp, -sp);
-  let focal = 1.0 / tan(blades.camera.z * 0.5);
-  let dd = pos - ro;
-  let vx = dd.x;
-  let vy = dot(dd, up);
-  let vz = dot(dd, fwd);
   var out: VertexOut;
-  out.position = vec4f(vx * focal / blades.camera.w - blades.jitter.x * vz, vy * focal + blades.jitter.y * vz, vz * vz / FAR, vz);
+  if (blades.light.x > 0.5) {
+    // Shadow map from the door light: a paraboloid projection of the hemisphere in front of
+    // the door, depth = distance from the light. Blade triangles are centimetres across, so
+    // the curved projection barely bends them.
+    let dl = pos - lightPosition();
+    let rl = length(dl);
+    let dirl = dl / max(rl, 1e-4);
+    let uvl = dirl.xy / max(1.0 - dirl.z, 1e-3);
+    let zl = select(rl / SHADOW_FAR, 2.0, dirl.z > -0.02);   // behind the door plane: clipped away
+    out.position = vec4f(uvl.x, uvl.y, zl, 1.0);
+  } else {
+    // The scene camera: at (0, height, 0), pitched, looking along +z. The jitter shifts the
+    // projection so the pixel centre coincides with the raymarcher's sub-pixel sample.
+    let ro = vec3f(0.0, blades.camera.x, 0.0);
+    let cp = cos(blades.camera.y);
+    let sp = sin(blades.camera.y);
+    let fwd = vec3f(0.0, sp, cp);
+    let up = vec3f(0.0, cp, -sp);
+    let focal = 1.0 / tan(blades.camera.z * 0.5);
+    let dd = pos - ro;
+    let vx = dd.x;
+    let vy = dot(dd, up);
+    let vz = dot(dd, fwd);
+    out.position = vec4f(vx * focal / blades.camera.w - blades.jitter.x * vz, vy * focal + blades.jitter.y * vz, vz * vz / FAR, vz);
+  }
   out.world = pos;
   out.tangent = d;
   out.extra = vec2f(s, seed);
+  out.baseY = terrainHeight(base);
   return out;
 }
 
 struct FragmentOut {
   @location(0) dist: vec4f,    // distance from the camera along the ray, blade tangent
-  @location(1) color: vec4f,   // linear albedo, fraction along the blade
+  @location(1) color: vec4f,   // linear albedo, height above the terrain (m)
 }
 
 fn srgb2lin(c: vec3f) -> vec3f {
@@ -201,9 +222,9 @@ fn srgb2lin(c: vec3f) -> vec3f {
   if (fract(seed * 13.7) < 0.07) {
     albedo = mix(albedo, srgb2lin(vec3f(158.0, 128.0, 66.0) / 255.0), 0.85);
   }
-  let ro = vec3f(0.0, blades.camera.x, 0.0);
+  let origin = select(vec3f(0.0, blades.camera.x, 0.0), lightPosition(), blades.light.x > 0.5);
   var out: FragmentOut;
-  out.dist = vec4f(length(in.world - ro), normalize(in.tangent));
-  out.color = vec4f(albedo, s);
+  out.dist = vec4f(length(in.world - origin), normalize(in.tangent));
+  out.color = vec4f(albedo, max(in.world.y - in.baseY, 0.0));
   return out;
 }
