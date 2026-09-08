@@ -70,6 +70,11 @@ export fn gridTileUv(g: vec2f, slice: i32) -> vec2f {
 const GAS_GLOW: vec3f = vec3f(0.9, 0.48, 1.0);
 const EXIT_GLOW: vec3f = vec3f(0.36, 0.5, 1.0);
 const DIAMOND_GLOW: vec3f = vec3f(0.95, 0.92, 1.0);
+// Jet speed in plume units per second (the plume is ~14.5 units long): the
+// fine fibres stream at this speed, the large eddies that shape the
+// silhouette lag behind like the shear layer does. ~7% of the plume length
+// per frame at 30 fps, fast enough to read as exhaust yet still trackable.
+const FLOW_SPEED: f32 = 30.0;
 
 // Planckian-locus chromaticity (Kang et al. 2002 fit, valid 1667-4000 K)
 // converted to linear sRGB with Y = 1, scaled by a T^4 luminance term.
@@ -167,23 +172,27 @@ export fn evaluatePlume(
 
   // Soft body: domain-warped 3D fbm/billow, mildly stretched along the flow.
   // This only sets the low-frequency silhouette and opacity.
-  let flow = vec3f(0.0, 0.0, -time * 1.3);
-  let warpN = noise3(atlas, atlasSamp, vec3f(qx, qy, s * 0.7) * 0.4 + flow * 0.55 + vec3f(0.31, 0.77, 0.0));
+  // Advection: how far the flow has travelled along the axis, in plume
+  // units. Each lookup subtracts it from its own s coordinate (scaled by
+  // that lookup's frequency) so every layer moves at a physical speed.
+  let travel = time * FLOW_SPEED;
+  let warpN = noise3(atlas, atlasSamp, vec3f(qx, qy, (s - travel * 0.5) * 0.7) * 0.4 + vec3f(0.31, 0.77, 0.0));
   let warp = (vec2f(warpN.a, warpN.r) - 0.5) * (0.25 + 0.35 * burn) * radius;
-  let warped = vec3f((qx + warp.x) * 1.4, (qy + warp.y) * 1.4, s * 0.75);
-  let n = noise3(atlas, atlasSamp, warped + flow);
+  let warped = vec3f((qx + warp.x) * 1.4, (qy + warp.y) * 1.4, (s - travel * 0.6) * 0.75);
+  let n = noise3(atlas, atlasSamp, warped);
 
   // Fibre field (the reference's dominant texture): ridged noise stretched
   // ~10x along the flow. One volumetric lookup (atlas .b) so fibres have
   // depth, plus a cylindrical 2D lookup (detail .g) for the fine hairs,
   // sheared outward with radius so the fringe fans out like a herringbone.
-  let fib3 = noise3(atlas, atlasSamp, vec3f((qx + warp.x * 0.5) * 1.7, (qy + warp.y * 0.5) * 1.7, s * 0.1) + flow * 0.45 + vec3f(0.5, 0.2, 0.37)).b;
+  let fib3 = noise3(atlas, atlasSamp, vec3f((qx + warp.x * 0.5) * 1.7, (qy + warp.y * 0.5) * 1.7, (s - travel) * 0.1) + vec3f(0.5, 0.2, 0.37)).b;
   let theta = atan2(qy, qx) / (2.0 * PI);
-  let fibreUv = vec2f(theta * 7.0 + warp.x * 0.35, (s - radEnv * radius * 0.6) * 0.085 - time * 0.75);
+  let fibreUv = vec2f(theta * 7.0 + warp.x * 0.35, (s - radEnv * radius * 0.6 - travel) * 0.085);
   let fib2 = textureSampleLevel(detail, detailSamp, fibreUv, 0.0);
   // Knots: a nearly isotropic lookup along the flow breaks the streaks into
-  // segments of varying brightness instead of uniform brush strokes.
-  let knots = textureSampleLevel(detail, detailSamp, vec2f(theta * 7.0 + 0.13, s * 0.55 - time * 0.75 + fib2.b * 0.2), 0.0).r;
+  // segments of varying brightness instead of uniform brush strokes. They
+  // ride slightly slower than the fibres so the segments shimmer along them.
+  let knots = textureSampleLevel(detail, detailSamp, vec2f(theta * 7.0 + 0.13, (s - travel * 0.85) * 0.55 + fib2.b * 0.2), 0.0).r;
   // fib2.a is the three-octave ridged stack baked into the detail texture.
   let filament = clamp((fib3 * 0.42 + fib2.a * 0.74) * (0.65 + 0.7 * knots), 0.0, 1.0);
   // Thin, high-contrast hairs: only the ridge tops light up.
